@@ -33,6 +33,24 @@ if (process.env.RUN_KEEPER === "1") {
   tick();
 }
 
+let indexerTimer;
+if (process.env.RUN_INDEXER === "1" && relayer.indexer) {
+  const tick = async () => {
+    let delaySec = 20;
+    try {
+      const r = await relayer.indexer.step();
+      if (r.behind > 0) delaySec = 1; // still catching up: keep going
+      if (r.requests > 1) console.log(`indexer at block ${r.nextBlock} of ${r.head} (${r.behind} behind)`);
+    } catch (e) {
+      console.error(`indexer step failed: ${e.shortMessage || e.message}`);
+      delaySec = 30;
+    }
+    indexerTimer = setTimeout(tick, delaySec * 1000);
+  };
+  console.log(`indexer enabled from block ${relayer.indexer.config.startBlock}`);
+  tick();
+}
+
 let analystTimer;
 if (process.env.RUN_ANALYST === "1" && relayer.analyst) {
   const intervalSec = Number(process.env.ANALYST_INTERVAL_SEC || 600);
@@ -54,6 +72,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     clearTimeout(keeperTimer);
     clearTimeout(analystTimer);
+    clearTimeout(indexerTimer);
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 5000).unref();
   });

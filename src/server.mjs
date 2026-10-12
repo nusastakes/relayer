@@ -12,6 +12,8 @@
 //   GET  /style/:vault                                            -> { code, nonce }
 //   PUT  /book { owner, id, ciphertext, nonce, signature }        -> { hash, ... }   (sealed strategy book: ciphertext only, see src/book.mjs)
 //   GET  /book/:owner  and  GET /book/:owner/:id                  -> entries (ciphertext on the second)
+//   GET  /leaderboard, /metrics, /index, /economy                 -> cities ranked by return with live TVL and indexed residents; platform numbers; indexer progress; DefiLlama fees per sector
+//   GET  /report/:city?days=7                                     -> the Humas's report in Indonesian (the mayor must have hired it)
 //   GET  /agents                                                  -> the AI staff a mayor can hire (Satpam, Analis, Humas)
 //   GET  /analyst                                                 -> { address, role } (the Analyst bot; needs ANALYST_PRIVATE_KEY)
 //   GET  /proposals/:city                                         -> the Analyst's proposals with their reasons and on-chain status
@@ -19,6 +21,7 @@
 //
 // Environment: RELAYER_PRIVATE_KEY (required), MONAD_TESTNET_RPC, FACTORY_ADDRESS, AUSD_FAUCET (set to "" to disable
 // /faucet), PORT (default 8787), ALLOWED_ORIGIN (CORS, comma-separated, default http://localhost:3000), TRUST_PROXY=1 behind a proxy such as Railway, MAX_DEPOSIT_ASSETS,
+// INDEX_FILE (default ./data/index.json), INDEXER=0 / ECONOMY=0 to turn those off, INDEX_RANGE (logs per request, default 100; some RPCs allow 10000), INDEX_START_BLOCK, HUMAS_ADDRESS (turns the Humas on),
 // BOOK_FILE (default ./data/book.json, "" turns /book off), ANALYST_PRIVATE_KEY (turns the Analyst on), PROPOSALS_FILE (default ./data/proposals.json), ANTHROPIC_API_KEY and/or XKIRO_API_KEY (optional, they write the reasons; Anthropic is tried first), ANALYST_LLM=0 to ignore the keys, ANALYST_LLM_MODEL, XKIRO_MODEL,
 // STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off).
 
@@ -29,6 +32,9 @@ import { HttpError } from "./guards.mjs";
 import { createRelayer } from "./relayer.mjs";
 import { createStyleStore } from "./style.mjs";
 import { createBookStore } from "./book.mjs";
+import { createEconomy } from "./economy.mjs";
+import { createHumas } from "./humas.mjs";
+import { createIndexer } from "./indexer.mjs";
 import { agentList } from "./agents.mjs";
 import { createAnalyst, createPlanStore } from "./analyst.mjs";
 
@@ -39,6 +45,8 @@ const DEFAULTS = {
   styleFile: "./data/styles.json",
   proposalsFile: "./data/proposals.json",
   bookFile: "./data/book.json",
+  indexFile: "./data/index.json",
+  factoryDeployBlock: 70461935, // block of the v2 CityFactory deployment, where the indexer starts
   guardian: "0x083899bEE8138E5f951db568926393FDb1F418A2", // CityGuardian, contracts/deployments/monad-testnet.json
   feed: "0x707A675DDc976B0E9C6B520Dbd0326204F30d540", // ApyFeed
   sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d", // morpho-grove-steakhouse-high-yield-ausd-mainnet
@@ -56,6 +64,14 @@ export function buildRelayerFromEnv(env = process.env) {
   const factory = env.FACTORY_ADDRESS || DEFAULTS.factory;
   const styleFile = env.STYLE_FILE === undefined ? DEFAULTS.styleFile : env.STYLE_FILE;
   const style = styleFile ? createStyleStore({ publicClient, factory, file: styleFile }) : null;
+  // Staff text (Analis reasons, Humas reports) is written by Anthropic first and by the xKiro gateway if that fails; neither key is required.
+  const llm =
+    env.ANALYST_LLM === "0"
+      ? []
+      : [
+          env.ANTHROPIC_API_KEY && { provider: "anthropic", apiKey: env.ANTHROPIC_API_KEY, model: env.ANALYST_LLM_MODEL || undefined },
+          env.XKIRO_API_KEY && { provider: "xkiro", apiKey: env.XKIRO_API_KEY, model: env.XKIRO_MODEL || undefined },
+        ].filter(Boolean);
   let analyst = null;
   if (env.ANALYST_PRIVATE_KEY) {
     const analystAccount = privateKeyToAccount(env.ANALYST_PRIVATE_KEY);
@@ -64,17 +80,24 @@ export function buildRelayerFromEnv(env = process.env) {
       publicClient,
       walletClient: createWalletClient({ account: analystAccount, chain, transport: viemHttp(rpc) }),
       store: createPlanStore({ file: proposalsFile || undefined }),
-      // Reasons are written by Anthropic first and by the xKiro gateway if that fails; neither key is required.
-      llm:
-        env.ANALYST_LLM === "0"
-          ? null
-          : [
-              env.ANTHROPIC_API_KEY && { provider: "anthropic", apiKey: env.ANTHROPIC_API_KEY, model: env.ANALYST_LLM_MODEL || undefined },
-              env.XKIRO_API_KEY && { provider: "xkiro", apiKey: env.XKIRO_API_KEY, model: env.XKIRO_MODEL || undefined },
-            ].filter(Boolean),
+      llm,
       config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian, factory, feed: env.FEED_ADDRESS || DEFAULTS.feed, sourceId: env.APY_SOURCE_ID || DEFAULTS.sourceId, asset: env.AUSD_ADDRESS || DEFAULTS.asset },
     });
   }
+  const indexFile = env.INDEX_FILE === undefined ? DEFAULTS.indexFile : env.INDEX_FILE;
+  const indexer =
+    env.INDEXER === "0"
+      ? null
+      : createIndexer({
+          publicClient,
+          file: indexFile || undefined,
+          config: { factory, startBlock: env.INDEX_START_BLOCK || DEFAULTS.factoryDeployBlock, range: env.INDEX_RANGE ? Number(env.INDEX_RANGE) : 100 },
+        });
+  const economy = env.ECONOMY === "0" ? null : createEconomy();
+  const humas =
+    env.HUMAS_ADDRESS && indexer
+      ? createHumas({ publicClient, indexer, address: env.HUMAS_ADDRESS, llm, analystStore: analyst?.store ?? null, config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian } })
+      : null;
   const bookFile = env.BOOK_FILE === undefined ? DEFAULTS.bookFile : env.BOOK_FILE;
   const book = bookFile ? createBookStore({ file: bookFile }) : null;
   return createRelayer({
@@ -83,6 +106,9 @@ export function buildRelayerFromEnv(env = process.env) {
     style,
     analyst,
     book,
+    indexer,
+    humas,
+    economy,
     config: {
       factory,
       faucet: env.AUSD_FAUCET === undefined ? DEFAULTS.faucet : env.AUSD_FAUCET || null,
@@ -147,6 +173,13 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (req.method === "POST" && path === "/faucet") return send(200, await relayer.faucet(await readJson(req), ctx));
       if (relayer.style && req.method === "POST" && path === "/style") return send(200, await relayer.style.set(await readJson(req), ctx));
       if (relayer.style && req.method === "GET" && path.startsWith("/style/")) return send(200, relayer.style.get(decodeURIComponent(path.slice("/style/".length))));
+      if (relayer.indexer && req.method === "GET" && path === "/leaderboard") return send(200, await relayer.indexer.leaderboard());
+      if (relayer.indexer && req.method === "GET" && path === "/metrics") return send(200, await relayer.indexer.metrics());
+      if (relayer.indexer && req.method === "GET" && path === "/index") return send(200, relayer.indexer.status());
+      if (relayer.economy && req.method === "GET" && path === "/economy") return send(200, await relayer.economy.get());
+      if (relayer.humas && req.method === "GET" && path.startsWith("/report/")) {
+        return send(200, await relayer.humas.report(decodeURIComponent(path.slice("/report/".length)), new URL(req.url, "http://localhost").searchParams.get("days") ?? undefined, ctx));
+      }
       if (req.method === "GET" && path === "/agents") return send(200, agentList(relayer, relayer.analyst?.config?.guardian ?? DEFAULTS.guardian));
       if (relayer.book && (req.method === "PUT" || req.method === "POST") && path === "/book") return send(200, await relayer.book.put(await readJson(req, 40_000), ctx));
       if (relayer.book && req.method === "GET" && path.startsWith("/book/")) {

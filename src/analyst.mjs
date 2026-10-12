@@ -57,7 +57,7 @@ export function formatAssets(amount) {
   const cents = amount / 10_000n;
   return `${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
 }
-const formatPercent = (bps) => `${bps / 100n}.${String(bps % 100n).padStart(2, "0")}`;
+export const formatPercent = (bps) => `${bps / 100n}.${String(bps % 100n).padStart(2, "0")}`;
 
 /**
  * @param {{total: bigint, idle: bigint, maxShiftBps: bigint, apyBps: bigint | null, apyAgeSeconds: number | null,
@@ -200,7 +200,7 @@ const PROVIDERS = {
  * Asks one provider for the reason text. Returns null on any failure so the caller can try the next one or fall back to
  * the template.
  */
-export async function askForReason({ provider = "anthropic", apiKey, model, baseUrl, fetchImpl = fetch, timeoutMs = 15_000 }, facts) {
+export async function askForReason({ provider = "anthropic", apiKey, model, baseUrl, fetchImpl = fetch, timeoutMs = 15_000 }, facts, options = {}) {
   const known = PROVIDERS[provider];
   if (!apiKey || !known) return null;
   const headers = { "content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": apiKey };
@@ -212,9 +212,9 @@ export async function askForReason({ provider = "anthropic", apiKey, model, base
       // Sonnet 5.5 on Anthropic thinks by default and the thinking would eat the token budget; the answer is two sentences.
       body: JSON.stringify({
         model: model ?? known.model,
-        max_tokens: 600,
+        max_tokens: options.maxTokens ?? 600,
         ...(provider === "anthropic" ? { thinking: { type: "between_tools" } } : {}),
-        system: REASON_SYSTEM,
+        system: options.system ?? REASON_SYSTEM,
         messages: [{ role: "user", content: JSON.stringify(facts) }],
       }),
       signal: AbortSignal.timeout(timeoutMs),
@@ -229,9 +229,9 @@ export async function askForReason({ provider = "anthropic", apiKey, model, base
 }
 
 /** Tries the providers in order and returns the first text that `accept` approves (any text by default). */
-export async function askForReasonAny(providers, facts, accept = () => true) {
+export async function askForReasonAny(providers, facts, accept = () => true, options = {}) {
   for (const p of providers) {
-    const text = await askForReason(p, facts);
+    const text = await askForReason(p, facts, options);
     if (text && accept(text)) return text;
   }
   return null;

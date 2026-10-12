@@ -23,6 +23,10 @@ tangan permit), siapa pun pengirimnya.
 | `PUT /book` | `{ owner, id, ciphertext, nonce, signature }`; `signature` = EIP-712 `BookEntry(address owner, string id, bytes32 ciphertextHash, uint256 nonce)` dari akun **pemilik** (domain sama dengan `/style`), `ciphertext` hex maksimal 16 KB, `id` 1–64 karakter | `{ owner, id, hash, bytes, createdAt, nonce }` dengan `hash = keccak256(ciphertext)` (nilai yang dipakai klien sebagai `planHash` di `rebalance`). Penyimpanan **ciphertext saja** untuk buku strategi tersegel: entri tidak pernah ditimpa (`409`), `nonce` harus naik (nonce pertama boleh 0), maksimal 200 entri per pemilik, `403` bila bukan tanda tangan pemilik |
 | `GET /book/:owner`, `GET /book/:owner/:id` | | daftar entri tanpa ciphertext beserta `nonce` terakhir (`"-1"` bila kosong), dan satu entri lengkap dengan ciphertext; publik, karena ciphertext tanpa kunci tidak berguna |
 | `GET /agents` | | staf AI yang bisa dipekerjakan walikota (Satpam, Analis, Humas) dengan peran, alamat, status |
+| `GET /leaderboard` | | kota diurutkan menurut return sejak berdiri: `{ rank, name, community, mayor, tvl, returnBps, residents, createdAt, ranked }`. TVL dan return dibaca langsung dari rantai, jumlah penduduk dari pencatat. Kota dengan TVL di bawah 1 AUSD atau tanpa share tidak diberi peringkat (`rank: null`), karena harga share kota kosong tidak berarti |
+| `GET /metrics`, `GET /index` | | angka platform untuk cerita traksi (kota, walikota, penduduk, TVL, jumlah setor dan tarik) dan kemajuan pencatat (`complete`, `behindBlocks`) |
+| `GET /economy` | | laporan ekonomi (R13): fee per sektor Monad dari DefiLlama untuk 24 jam, 7 hari, dan 30 hari, lengkap dengan sumber, URL, dan waktu pengambilan; di-cache 10 menit, dan memakai data lama (`stale: true`) bila DefiLlama tidak terjangkau |
+| `GET /report/:city?days=7` | | laporan Humas dalam bahasa Indonesia (1 sampai 30 hari) dari event on-chain dan snapshot harga; hanya untuk kota yang walikotanya memberi Humas (`0x8Df168681FE3EF206D8a3fE8eC0C003A776aD498`) peran `HUMAS` (3), jika tidak `status: not-hired` |
 | `GET /analyst` | | `{ address, role: 2, roleName: "ANALIS", guardian, llm }`: alamat bot Analis (`0xDFef53a0d68fd0481c5d4b3D708F3Ed2e6313B1e`), yang harus diberi peran `ANALIS` oleh walikota |
 | `GET /proposals/:city` | | usulan Analis untuk kota itu: `{ proposalId, planHash, txHash, status: pending / approved / expired, plan }` dengan `plan` memuat alasan dan angka; `keccak256(JSON.stringify(plan)) == planHash` |
 | `POST /analyst/run` | `{ city }` | memeriksa satu kota sekarang; `{ status: proposed / nothing-to-do / not-granted / pending / cooldown / ... }`. Tidak berbahaya: dana baru bergerak bila walikota menyetujui |
@@ -37,7 +41,7 @@ relayer tidak cukup. Pembatas laju per IP: setor dan tarik 30 per menit, faucet 
 
 ```
 npm install
-npm test                         # 98 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
+npm test                         # 113 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
 RELAYER_PRIVATE_KEY=0x… npm start   # server di :8787; HTTP, dan keeper bila RUN_KEEPER=1 (src/main.mjs)
 ```
 
@@ -45,7 +49,7 @@ Variabel: `RELAYER_PRIVATE_KEY` (wajib, hanya dari environment), `MONAD_TESTNET_
 (kosongkan untuk mematikan `/faucet`), `PORT`, `ALLOWED_ORIGIN` (CORS, beberapa origin dipisah koma, bawaan
 `http://localhost:3000`), `MAX_DEPOSIT_ASSETS`, `TRUST_PROXY=1` (baca IP klien dari `X-Forwarded-For` di belakang
 proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INTERVAL_SEC` (bawaan 3600), `ANALYST_PRIVATE_KEY` (menyalakan bot Analis), `RUN_ANALYST=1` dan `ANALYST_INTERVAL_SEC` (bawaan 600) untuk memindai semua kota
-tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `BOOK_FILE` (bawaan `./data/book.json`, kosongkan untuk mematikan `/book`), `ANTHROPIC_API_KEY` dan/atau `XKIRO_API_KEY` (opsional; Sonnet menulis alasan usulan, Anthropic dicoba lebih dulu lalu gateway xKiro
+tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `BOOK_FILE` (bawaan `./data/book.json`, kosongkan untuk mematikan `/book`), `RUN_INDEXER=1` (menjalankan pencatat), `INDEX_FILE` (bawaan `./data/index.json`), `INDEX_RANGE` (blok per permintaan `getLogs`, bawaan 100), `INDEX_START_BLOCK` (bawaan blok deploy factory v2, 70461935), `INDEXER=0` / `ECONOMY=0` untuk mematikan, `HUMAS_ADDRESS` (menyalakan Humas), `ANTHROPIC_API_KEY` dan/atau `XKIRO_API_KEY` (opsional; Sonnet menulis alasan usulan, Anthropic dicoba lebih dulu lalu gateway xKiro
 dengan model `anthropic/claude-sonnet-5` atau `XKIRO_MODEL`; `ANALYST_LLM=0` mengabaikannya), `STYLE_FILE` (berkas JSON
 tempat gaya kota disimpan, bawaan `./data/styles.json`; isi dengan jalur di volume agar bertahan lintas deploy, kosongkan untuk
 mematikan `/style`).
@@ -95,6 +99,12 @@ Aturan (`decide`, deterministik; angka tidak pernah datang dari LLM):
 
 Alasan usulan ditulis dalam bahasa Indonesia dari fakta. Bila `ANTHROPIC_API_KEY` atau `XKIRO_API_KEY` diisi, Sonnet menulisnya (Anthropic dulu, xKiro bila gagal); teks LLM dibuang bila tidak menyebut jumlah yang diusulkan, dan alasan kembali ke template bila semua provider gagal. Jumlah dalam teks dipotong ke dua desimal, bukan dibulatkan. Alasan dan angkanya disimpan di relayer; `planHash` di rantai = `keccak256` dari JSON rencana (urutan kunci tetap), jadi alasan yang dibaca walikota dapat diperiksa terhadap usulan di rantai. Uji ujung ke ujung di testnet: `CITY=0x… node scripts/analyst-e2e.mjs`.
 
+## Pencatat, papan peringkat, laporan ekonomi, dan Humas (`src/indexer.mjs`, `src/economy.mjs`, `src/humas.mjs`)
+
+RPC publik Monad membatasi `eth_getLogs` ke 100 blok per permintaan, jadi pencatat berjalan di latar belakang dari blok deploy factory, per potongan, dan mengingat sampai mana ia membaca (berkas di volume). Yang disimpan: kota dan walikotanya (event `CityCreated`), pemegang share dari event `Transfer`, buku besar setoran, penarikan, pemindahan dana, evakuasi, fee, dan pembukaan kunci (dengan waktu blok), dan snapshot harga share serta total aset tiap jam. TVL dan return selalu dibaca langsung dari rantai. Backfill pertama (±40 ribu blok) memakan ±4,5 menit. Penduduk = pemegang share yang pernah setor (penerima fee walikota dan treasury tidak ikut kecuali mereka juga setor). Semua yang disimpan bisa dibangun ulang dari rantai.
+
+Humas adalah anggota staf ketiga: hanya membaca dan menulis laporan, tanpa kunci dan tanpa transaksi. Angka laporan datang dari pencatat dan pembacaan langsung; teksnya disusun dari template atau ditulis ulang oleh LLM (Anthropic dulu, xKiro cadangan), dan tulisan LLM dibuang bila tidak memuat total aset dan persentase hasil. Alasan pemindahan diambil dari rencana Analis yang cocok dengan `planHash`; bila `planHash` itu hash entri buku strategi tersegel, laporan hanya menyebut bahwa alasannya tersegel. Bila riwayat harga baru dimulai setelah awal periode, laporan menyebut sejak kapan datanya ada.
+
 ## Buku strategi tersegel (`src/book.mjs`) dan daftar staf (`src/agents.mjs`)
 
 PRD (arsitektur dan R10, bounty B17) menyebut "penyimpanan tak tepercaya" untuk ciphertext buku strategi. Browser mengenkripsi tiap entri dengan kunci turunan passkey (HKDF per entri), jadi relayer hanya memegang ciphertext yang tidak bisa ia baca. Perangkat kedua dengan passkey yang sama menurunkan kunci yang sama, mengambil ciphertext dari sini, dan mendekripsinya (cross-device test). Hash `keccak256(ciphertext)` dicatat on-chain sebagai `planHash` pada `rebalance`; di akhir musim walikota membuka kunci entri pilihan dan siapa pun bisa mengambil ciphertext publik, mendekripsi, dan mencocokkan hash. Entri tidak bisa ditimpa atau dihapus lewat API, supaya keputusan tidak bisa diganti diam-diam setelah hasilnya terlihat. Operator relayer tetap bisa menghapus berkasnya; yang membuktikan isi dan waktunya adalah hash on-chain. Skrip uji: `RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/book-check.mjs`.
@@ -123,6 +133,7 @@ Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`,
 
 ## Belum diuji / batasan
 
+- Pencatat: riwayat harga per jam baru ada sejak pencatat pertama berjalan (13 Okt 04:15 WIB), jadi laporan Humas untuk kota yang lebih tua hanya mencakup periode itu dan menyebutnya. Jumlah penduduk menghitung penyetor; share yang berpindah lewat transfer ke orang yang tidak pernah setor tidak terhitung. Bergantung pada RPC publik (100 blok per `getLogs`); bila RPC membatasi lebih ketat, pencatat tertinggal (`/index` menunjukkan `behindBlocks`).
 - Analis: alasan dan rencana disimpan di berkas JSON relayer (hilang bila volume hilang), hanya hash-nya yang ada di rantai. Bot memakai satu kunci (`ANALYST_PRIVATE_KEY`) untuk semua kota, dan perannya berlaku per kota selama walikota tidak mencabutnya atau masa berlakunya habis. Aturannya sengaja sederhana (satu adapter yield simulasi); belum ada pembobotan risiko antar adapter.
 
 - Akun Mera adalah EOA biasa menurut dokumentasi resmi dan `toViemAccount` mendukung `signTypedData`, tetapi permit
