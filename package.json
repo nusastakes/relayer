@@ -10,7 +10,8 @@
   "scripts": {
     "keeper": "node src/keeper.mjs",
     "keeper:dry": "node src/keeper.mjs --dry",
-    "test": "node --test test/"
+    "test": "node --test test/",
+    "start": "node src/server.mjs"
   },
   "engines": {
     "node": ">=22"
