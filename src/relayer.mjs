@@ -24,7 +24,7 @@ const fullReason = (e) => [e?.shortMessage, e?.message, e?.details, e?.data, e?.
 /** The faucet's `MaxFrequencyExceeded()` error, which is not in our ABI so viem cannot name it. */
 export const FAUCET_FREQUENCY_ERROR = /MaxFrequencyExceeded|0x20e5bc67/;
 
-export function createRelayer({ publicClient, walletClient, config, style = null, now = () => Date.now() }) {
+export function createRelayer({ publicClient, walletClient, config, style = null, analyst = null, now = () => Date.now() }) {
   const c = {
     factory: config.factory,
     faucet: config.faucet,
@@ -122,6 +122,8 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     config: c,
     /** The optional city-style store (src/style.mjs); the HTTP layer serves /style from it. */
     style,
+    /** The optional Analyst bot (src/analyst.mjs): /analyst, /proposals/:city and the scan loop. */
+    analyst,
 
     async health() {
       const [balance, head] = await Promise.all([publicClient.getBalance({ address: account.address }), publicClient.getBlock()]);
@@ -134,6 +136,7 @@ export function createRelayer({ publicClient, walletClient, config, style = null
         faucetEnabled: Boolean(c.faucet),
         gasDripEnabled: c.gasDripWei > 0n,
         styleEnabled: Boolean(style),
+        analystEnabled: Boolean(analyst),
       };
     },
 

@@ -20,6 +20,9 @@ tangan permit), siapa pun pengirimnya.
 | `POST /gas-drip` | `{ address }` (hanya testnet) | `{ hash, recipient, amountWei }`: 1 MON untuk walikota atau kunci sesinya (cukup untuk `createCity`, yang butuh saldo sekitar 0,63 MON), sekali per alamat per hari, hanya bila saldo < 0,7 MON |
 | `POST /style` | `{ vault, code, nonce, signature }`; `signature` = EIP-712 `CityStyle(address vault, string code, uint256 nonce)` dari akun **walikota**, domain `{ name: "Nusastakes", version: "1", chainId: 10143 }` (tanpa `verifyingContract`) | `{ vault, code, nonce }`. `code` kosong atau `<tema>.<topeng base36>` (huruf kecil, angka, `-`, `_`; maksimal 32 karakter), `nonce` harus lebih besar dari yang tersimpan (nonce pertama boleh 0). `403` bila penanda tangan bukan `vault.mayor()`, `409` bila nonce basi |
 | `GET /style/:vault` | | `{ code, nonce }` (`code: ""` bila belum ada) |
+| `GET /analyst` | | `{ address, role: 2, roleName: "ANALIS", guardian, llm }`: alamat bot Analis (`0xDFef53a0d68fd0481c5d4b3D708F3Ed2e6313B1e`), yang harus diberi peran `ANALIS` oleh walikota |
+| `GET /proposals/:city` | | usulan Analis untuk kota itu: `{ proposalId, planHash, txHash, status: pending / approved / expired, plan }` dengan `plan` memuat alasan dan angka; `keccak256(JSON.stringify(plan)) == planHash` |
+| `POST /analyst/run` | `{ city }` | memeriksa satu kota sekarang; `{ status: proposed / nothing-to-do / not-granted / pending / cooldown / ... }`. Tidak berbahaya: dana baru bergerak bila walikota menyetujui |
 
 Perlindungan: vault harus dibuat oleh `CityFactory` (`isCity`), deadline permit minimal 20 detik ke depan, batas jumlah
 (`MAX_DEPOSIT_ASSETS`, bawaan 10.000 AUSD), batas laju per pemilik (3 per menit) dan global (30 per menit), transaksi
@@ -31,14 +34,16 @@ relayer tidak cukup. Pembatas laju per IP: setor dan tarik 30 per menit, faucet 
 
 ```
 npm install
-npm test                         # 65 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota)
+npm test                         # 86 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
 RELAYER_PRIVATE_KEY=0x… npm start   # server di :8787; HTTP, dan keeper bila RUN_KEEPER=1 (src/main.mjs)
 ```
 
 Variabel: `RELAYER_PRIVATE_KEY` (wajib, hanya dari environment), `MONAD_TESTNET_RPC`, `FACTORY_ADDRESS`, `AUSD_FAUCET`
 (kosongkan untuk mematikan `/faucet`), `PORT`, `ALLOWED_ORIGIN` (CORS, beberapa origin dipisah koma, bawaan
 `http://localhost:3000`), `MAX_DEPOSIT_ASSETS`, `TRUST_PROXY=1` (baca IP klien dari `X-Forwarded-For` di belakang
-proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INTERVAL_SEC` (bawaan 3600), `STYLE_FILE` (berkas JSON
+proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INTERVAL_SEC` (bawaan 3600), `ANALYST_PRIVATE_KEY` (menyalakan bot Analis), `RUN_ANALYST=1` dan `ANALYST_INTERVAL_SEC` (bawaan 600) untuk memindai semua kota
+tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `ANTHROPIC_API_KEY` (opsional; Sonnet 5.5 menulis alasan usulan, `ANALYST_LLM=0`
+mengabaikannya), `STYLE_FILE` (berkas JSON
 tempat gaya kota disimpan, bawaan `./data/styles.json`; isi dengan jalur di volume agar bertahan lintas deploy, kosongkan untuk
 mematikan `/style`).
 
@@ -75,6 +80,18 @@ awal sampai akhir, share (100 AUSD) tercetak ke penduduk, yield simulasi tumbuh 
 50 AUSD dengan APY 1,28%), dan tarik penuh lewat relayer membayar 100 AUSD ke penduduk. Satu putaran menghabiskan
 sekitar 0,5 MON dari dompet relayer (terutama `createCity`).
 
+## Analis (`src/analyst.mjs`)
+
+Anggota staf AI yang mengusulkan pemindahan dana (PRD R19); ia tidak pernah memindahkan dana sendiri. Walikota memberi alamat bot (`0xDFef53a0d68fd0481c5d4b3D708F3Ed2e6313B1e`, lihat `GET /analyst`) peran `ANALIS` lewat `CityGuardian.grantAgent(kota, bot, 2, masaBerlaku)`. Bot memindai kota-kota di mana ia berwenang; bila aturan menemukan sesuatu yang layak, ia memanggil `CityGuardian.propose(kota, dari, ke, jumlah, planHash)`. Dana baru bergerak ketika walikota memanggil `CityGuardian.approve(kota, id)`, yang menjalankan `rebalance` dalam batas `maxShiftBps` vault.
+
+Aturan (`decide`, deterministik; angka tidak pernah datang dari LLM):
+- Kas menganggur di atas batas aman (20% dari aset kota) dan sumber yield (APY dari `ApyFeed`, tidak lebih tua dari 7 hari) minimal 0,50%: usulkan memindahkan kelebihan kas ke adapter yield yang paling sedikit isinya, paling banyak 95% dari yang boleh dipindah vault dalam satu panggilan, dan minimal 1 AUSD.
+- APY sumber di bawah 0,50% dan ada dana di adapter yield: usulkan menarik dana kembali ke kas.
+- Data yield hilang atau basi, kota kosong, atau tidak ada adapter dengan yield yang dikenal: tidak ada usulan.
+- Tidak mengusulkan lagi selama usulannya sendiri masih menunggu (belum disetujui dan belum lewat 1 hari), dan menunggu 30 menit setelah tiap usulan.
+
+Alasan usulan ditulis dalam bahasa Indonesia dari fakta. Bila `ANTHROPIC_API_KEY` diisi, Sonnet 5.5 menulisnya; teks LLM dibuang bila tidak menyebut jumlah yang diusulkan. Alasan dan angkanya disimpan di relayer; `planHash` di rantai = `keccak256` dari JSON rencana (urutan kunci tetap), jadi alasan yang dibaca walikota dapat diperiksa terhadap usulan di rantai. Uji ujung ke ujung di testnet: `CITY=0x… node scripts/analyst-e2e.mjs`.
+
 ## Keeper APY (`src/keeper.mjs`)
 
 Membaca APY vault AUSD di mainnet dan menulisnya ke `ApyFeed` di testnet, sehingga yield simulasi
@@ -98,6 +115,8 @@ RELAYER_PRIVATE_KEY=0x… node src/keeper.mjs --loop --interval 3600
 Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`, `APY_SOURCE_VAULT`, `APY_SOURCE_ID`.
 
 ## Belum diuji / batasan
+
+- Analis: alasan dan rencana disimpan di berkas JSON relayer (hilang bila volume hilang), hanya hash-nya yang ada di rantai. Bot memakai satu kunci (`ANALYST_PRIVATE_KEY`) untuk semua kota, dan perannya berlaku per kota selama walikota tidak mencabutnya atau masa berlakunya habis. Aturannya sengaja sederhana (satu adapter yield simulasi); belum ada pembobotan risiko antar adapter.
 
 - Akun Mera adalah EOA biasa menurut dokumentasi resmi dan `toViemAccount` mendukung `signTypedData`, tetapi permit
   belum ditandatangani dengan Mera sungguhan.

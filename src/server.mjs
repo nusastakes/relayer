@@ -10,9 +10,13 @@
 //   POST /faucet    { address }                                   -> { hash, status, recipient }   (testnet AUSD)
 //   POST /style     { vault, code, nonce, signature }             -> { vault, code, nonce }   (mayor-signed EIP-712 CityStyle, see src/style.mjs)
 //   GET  /style/:vault                                            -> { code, nonce }
+//   GET  /analyst                                                 -> { address, role } (the Analyst bot; needs ANALYST_PRIVATE_KEY)
+//   GET  /proposals/:city                                         -> the Analyst's proposals with their reasons and on-chain status
+//   POST /analyst/run  { city }                                   -> look at one city now (the mayor still has to approve any proposal)
 //
 // Environment: RELAYER_PRIVATE_KEY (required), MONAD_TESTNET_RPC, FACTORY_ADDRESS, AUSD_FAUCET (set to "" to disable
 // /faucet), PORT (default 8787), ALLOWED_ORIGIN (CORS, comma-separated, default http://localhost:3000), TRUST_PROXY=1 behind a proxy such as Railway, MAX_DEPOSIT_ASSETS,
+// ANALYST_PRIVATE_KEY (turns the Analyst on), PROPOSALS_FILE (default ./data/proposals.json), ANTHROPIC_API_KEY (optional, writes the reasons), ANALYST_LLM=0 to ignore the key, ANALYST_LLM_MODEL,
 // STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off).
 
 import http from "node:http";
@@ -21,12 +25,18 @@ import { privateKeyToAccount } from "viem/accounts";
 import { HttpError } from "./guards.mjs";
 import { createRelayer } from "./relayer.mjs";
 import { createStyleStore } from "./style.mjs";
+import { createAnalyst, createPlanStore } from "./analyst.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
   factory: "0x6765F0C80F6a7D5EC7Af120d12e81628F641508E", // CityFactory, contracts/deployments/monad-testnet.json
   faucet: "0xd236c18D274E54FAccC3dd9DDA4b27965a73ee6C", // Agora AUSD testnet faucet
   styleFile: "./data/styles.json",
+  proposalsFile: "./data/proposals.json",
+  guardian: "0x083899bEE8138E5f951db568926393FDb1F418A2", // CityGuardian, contracts/deployments/monad-testnet.json
+  feed: "0x707A675DDc976B0E9C6B520Dbd0326204F30d540", // ApyFeed
+  sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d", // morpho-grove-steakhouse-high-yield-ausd-mainnet
+  asset: "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC", // AUSD testnet
 };
 
 export function buildRelayerFromEnv(env = process.env) {
@@ -40,10 +50,23 @@ export function buildRelayerFromEnv(env = process.env) {
   const factory = env.FACTORY_ADDRESS || DEFAULTS.factory;
   const styleFile = env.STYLE_FILE === undefined ? DEFAULTS.styleFile : env.STYLE_FILE;
   const style = styleFile ? createStyleStore({ publicClient, factory, file: styleFile }) : null;
+  let analyst = null;
+  if (env.ANALYST_PRIVATE_KEY) {
+    const analystAccount = privateKeyToAccount(env.ANALYST_PRIVATE_KEY);
+    const proposalsFile = env.PROPOSALS_FILE === undefined ? DEFAULTS.proposalsFile : env.PROPOSALS_FILE;
+    analyst = createAnalyst({
+      publicClient,
+      walletClient: createWalletClient({ account: analystAccount, chain, transport: viemHttp(rpc) }),
+      store: createPlanStore({ file: proposalsFile || undefined }),
+      llm: env.ANTHROPIC_API_KEY && env.ANALYST_LLM !== "0" ? { apiKey: env.ANTHROPIC_API_KEY, model: env.ANALYST_LLM_MODEL || "claude-sonnet-5-5" } : null,
+      config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian, factory, feed: env.FEED_ADDRESS || DEFAULTS.feed, sourceId: env.APY_SOURCE_ID || DEFAULTS.sourceId, asset: env.AUSD_ADDRESS || DEFAULTS.asset },
+    });
+  }
   return createRelayer({
     publicClient,
     walletClient,
     style,
+    analyst,
     config: {
       factory,
       faucet: env.AUSD_FAUCET === undefined ? DEFAULTS.faucet : env.AUSD_FAUCET || null,
@@ -108,6 +131,9 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (req.method === "POST" && path === "/faucet") return send(200, await relayer.faucet(await readJson(req), ctx));
       if (relayer.style && req.method === "POST" && path === "/style") return send(200, await relayer.style.set(await readJson(req), ctx));
       if (relayer.style && req.method === "GET" && path.startsWith("/style/")) return send(200, relayer.style.get(decodeURIComponent(path.slice("/style/".length))));
+      if (relayer.analyst && req.method === "GET" && path === "/analyst") return send(200, relayer.analyst.info());
+      if (relayer.analyst && req.method === "GET" && path.startsWith("/proposals/")) return send(200, await relayer.analyst.list(decodeURIComponent(path.slice("/proposals/".length))));
+      if (relayer.analyst && req.method === "POST" && path === "/analyst/run") return send(200, await relayer.analyst.run(await readJson(req), ctx));
       throw new HttpError(404, "not found");
     } catch (e) {
       if (e instanceof HttpError) {
