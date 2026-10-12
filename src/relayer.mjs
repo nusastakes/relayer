@@ -33,8 +33,8 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     minBalance: config.minBalance ?? 10n ** 17n, // 0.1 MON
     gasMultiplierPercent: config.gasMultiplierPercent ?? 125n,
     maxGas: config.maxGas ?? 1_500_000n,
-    gasDripWei: config.gasDripWei ?? 5n * 10n ** 17n, // 0.5 MON
-    gasDripBelowWei: config.gasDripBelowWei ?? 25n * 10n ** 16n, // only to wallets holding less than 0.25 MON
+    gasDripWei: config.gasDripWei ?? 10n ** 18n, // 1 MON: founding a city needs about 0.63 MON in the wallet at a tight fee cap
+    gasDripBelowWei: config.gasDripBelowWei ?? 7n * 10n ** 17n, // only to wallets holding less than 0.7 MON
   };
   const account = walletClient.account;
   const mutex = new Mutex();
@@ -52,17 +52,34 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     faucet: createRateLimiter({ windowMs: 3_600_000, max: 5, now }),
     gasDrip: createRateLimiter({ windowMs: 24 * 3_600_000, max: 3, now }),
   };
-  function guardIp(kind, ip) {
+  function guardIp(kind, ip, spent = []) {
     if (!ip) return;
     if (!ipLimits[kind].hit(ip)) {
       throw new HttpError(429, `too many ${kind} requests from this address`, { retryAfterSeconds: Math.ceil(ipLimits[kind].retryAfterMs(ip) / 1000) });
     }
+    spent.push(() => ipLimits[kind].refund(ip));
   }
 
-  function guardRate(limiter, key, label) {
+  function guardRate(limiter, key, label, spent = []) {
     if (!global.hit("all")) throw new HttpError(429, "relayer is busy, try again shortly", { retryAfterSeconds: 10 });
+    spent.push(() => global.refund("all"));
     if (!limiter.hit(key)) {
+      spent.pop()();
       throw new HttpError(429, `too many ${label} requests`, { retryAfterSeconds: Math.ceil(limiter.retryAfterMs(key) / 1000) });
+    }
+    spent.push(() => limiter.refund(key));
+  }
+
+  /**
+   * Limits exist to bound requests that cost gas. A request that fails before sending anything (bad signature, the
+   * faucet's own cooldown) must not use up the caller's allowance, or a client retrying politely gets locked out.
+   */
+  async function refundingOnFailure(spent, work) {
+    try {
+      return await work();
+    } catch (e) {
+      for (const give of spent) give();
+      throw e;
     }
   }
 
@@ -116,28 +133,31 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
       const nowSeconds = BigInt(Math.floor(now() / 1000));
       if (b.deadline < nowSeconds + BigInt(c.minDeadlineSeconds)) throw new HttpError(400, "permit deadline is too close or already passed");
       if (b.assets > c.maxAssets) throw new HttpError(400, `assets above the relayer limit of ${c.maxAssets}`);
-      guardRate(perOwner, b.owner.toLowerCase(), "deposit");
+      const spent = [];
+      guardRate(perOwner, b.owner.toLowerCase(), "deposit", spent);
 
-      const isCity = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "isCity", args: [b.vault] });
-      if (!isCity) throw new HttpError(400, "vault was not created by the city factory");
-      const room = await publicClient.readContract({ address: b.vault, abi: vaultAbi, functionName: "maxDeposit", args: [b.owner] });
-      if (b.assets > room) throw new HttpError(400, `city only has room for ${room} more`);
-      await requireFunds();
+      return refundingOnFailure(spent, async () => {
+        const isCity = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "isCity", args: [b.vault] });
+        if (!isCity) throw new HttpError(400, "vault was not created by the city factory");
+        const room = await publicClient.readContract({ address: b.vault, abi: vaultAbi, functionName: "maxDeposit", args: [b.owner] });
+        if (b.assets > room) throw new HttpError(400, `city only has room for ${room} more`);
+        await requireFunds();
 
-      const { hash, receipt } = await send({
-        address: b.vault,
-        abi: vaultAbi,
-        functionName: "depositWithPermit",
-        args: [b.owner, b.assets, b.deadline, b.v, b.r, b.s],
+        const { hash, receipt } = await send({
+          address: b.vault,
+          abi: vaultAbi,
+          functionName: "depositWithPermit",
+          args: [b.owner, b.assets, b.deadline, b.v, b.r, b.s],
+        });
+        const [deposit] = parseEventLogs({ abi: vaultAbi, eventName: "Deposit", logs: receipt.logs });
+        return {
+          hash,
+          status: receipt.status,
+          gasUsed: receipt.gasUsed.toString(),
+          shares: deposit ? deposit.args.shares.toString() : null,
+          sharesOwner: deposit ? deposit.args.owner : null,
+        };
       });
-      const [deposit] = parseEventLogs({ abi: vaultAbi, eventName: "Deposit", logs: receipt.logs });
-      return {
-        hash,
-        status: receipt.status,
-        gasUsed: receipt.gasUsed.toString(),
-        shares: deposit ? deposit.args.shares.toString() : null,
-        sharesOwner: deposit ? deposit.args.owner : null,
-      };
     },
 
     /** POST /withdraw: redeem the owner's shares with a signed share permit; the assets go to the owner. */
@@ -146,28 +166,31 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
       const b = parseWithdrawBody(rawBody);
       const nowSeconds = BigInt(Math.floor(now() / 1000));
       if (b.deadline < nowSeconds + BigInt(c.minDeadlineSeconds)) throw new HttpError(400, "permit deadline is too close or already passed");
-      guardRate(perOwnerWithdraw, b.owner.toLowerCase(), "withdraw");
+      const spent = [];
+      guardRate(perOwnerWithdraw, b.owner.toLowerCase(), "withdraw", spent);
 
-      const isCity = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "isCity", args: [b.vault] });
-      if (!isCity) throw new HttpError(400, "vault was not created by the city factory");
-      const held = await publicClient.readContract({ address: b.vault, abi: vaultAbi, functionName: "maxRedeem", args: [b.owner] });
-      if (b.shares > held) throw new HttpError(400, `owner only holds ${held} shares`);
-      await requireFunds();
+      return refundingOnFailure(spent, async () => {
+        const isCity = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "isCity", args: [b.vault] });
+        if (!isCity) throw new HttpError(400, "vault was not created by the city factory");
+        const held = await publicClient.readContract({ address: b.vault, abi: vaultAbi, functionName: "maxRedeem", args: [b.owner] });
+        if (b.shares > held) throw new HttpError(400, `owner only holds ${held} shares`);
+        await requireFunds();
 
-      const { hash, receipt } = await send({
-        address: b.vault,
-        abi: vaultAbi,
-        functionName: "redeemWithPermit",
-        args: [b.owner, b.shares, b.deadline, b.v, b.r, b.s],
+        const { hash, receipt } = await send({
+          address: b.vault,
+          abi: vaultAbi,
+          functionName: "redeemWithPermit",
+          args: [b.owner, b.shares, b.deadline, b.v, b.r, b.s],
+        });
+        const [withdrawal] = parseEventLogs({ abi: vaultAbi, eventName: "Withdraw", logs: receipt.logs });
+        return {
+          hash,
+          status: receipt.status,
+          gasUsed: receipt.gasUsed.toString(),
+          assets: withdrawal ? withdrawal.args.assets.toString() : null,
+          receiver: withdrawal ? withdrawal.args.receiver : null,
+        };
       });
-      const [withdrawal] = parseEventLogs({ abi: vaultAbi, eventName: "Withdraw", logs: receipt.logs });
-      return {
-        hash,
-        status: receipt.status,
-        gasUsed: receipt.gasUsed.toString(),
-        assets: withdrawal ? withdrawal.args.assets.toString() : null,
-        receiver: withdrawal ? withdrawal.args.receiver : null,
-      };
     },
 
     /**
@@ -182,35 +205,53 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
       const held = await publicClient.getBalance({ address: b.address });
       if (held >= c.gasDripBelowWei) throw new HttpError(400, `address already holds ${held} wei, no drip needed`);
       if (!dripGlobal.hit("all")) throw new HttpError(429, "gas drips are used up for this hour", { retryAfterSeconds: Math.ceil(dripGlobal.retryAfterMs("all") / 1000) });
-      guardRate(perDripAddress, b.address.toLowerCase(), "gas-drip");
-      const fees = await feeCaps();
-      await requireFunds(c.gasDripWei + 21_000n * (fees.maxFeePerGas ?? 0n));
-      const hash = await mutex.run(async () => {
-        const h = await walletClient.sendTransaction({ to: b.address, value: c.gasDripWei, gas: 21_000n, ...fees });
-        await publicClient.waitForTransactionReceipt({ hash: h });
-        return h;
+      const spent = [() => dripGlobal.refund("all")];
+      try {
+        guardRate(perDripAddress, b.address.toLowerCase(), "gas-drip", spent);
+      } catch (e) {
+        spent[0]();
+        throw e;
+      }
+      return refundingOnFailure(spent, async () => {
+        const fees = await feeCaps();
+        await requireFunds(c.gasDripWei + 21_000n * (fees.maxFeePerGas ?? 0n));
+        const hash = await mutex.run(async () => {
+          const h = await walletClient.sendTransaction({ to: b.address, value: c.gasDripWei, gas: 21_000n, ...fees });
+          await publicClient.waitForTransactionReceipt({ hash: h });
+          return h;
+        });
+        return { hash, recipient: b.address, amountWei: c.gasDripWei.toString() };
       });
-      return { hash, recipient: b.address, amountWei: c.gasDripWei.toString() };
     },
 
     /** POST /faucet (testnet only): free AUSD for a new resident, gas paid by the relayer. */
     async faucet(rawBody, ctx = {}) {
-      guardIp("faucet", ctx.ip);
+      const spentIp = [];
+      guardIp("faucet", ctx.ip, spentIp);
       const b = parseFaucetBody(rawBody);
       if (!c.faucet) throw new HttpError(404, "faucet is not configured");
-      guardRate(perFaucetAddress, b.address.toLowerCase(), "faucet");
-      await requireFunds();
-      const request = { address: c.faucet, abi: faucetAbi, functionName: "requestFunds", args: [b.address] };
+      const spent = [];
+      guardRate(perFaucetAddress, b.address.toLowerCase(), "faucet", spent);
       try {
-        await publicClient.simulateContract({ ...request, account });
+        return await refundingOnFailure(spent, async () => {
+          await requireFunds();
+          const request = { address: c.faucet, abi: faucetAbi, functionName: "requestFunds", args: [b.address] };
+          try {
+            await publicClient.simulateContract({ ...request, account });
+          } catch (e) {
+            if (FAUCET_FREQUENCY_ERROR.test(fullReason(e))) {
+              throw new HttpError(429, "the faucet was used a moment ago, try again", { retryAfterSeconds: 20, faucetCooldown: true });
+            }
+            throw new HttpError(400, `faucet would refuse: ${shortReason(e)}`);
+          }
+          const { hash, receipt } = await send(request);
+          return { hash, status: receipt.status, recipient: b.address };
+        });
       } catch (e) {
-        if (FAUCET_FREQUENCY_ERROR.test(fullReason(e))) {
-          throw new HttpError(429, "the faucet was used a moment ago, try again", { retryAfterSeconds: 20 });
-        }
-        throw new HttpError(400, `faucet would refuse: ${shortReason(e)}`);
+        // The faucet's own cooldown costs nothing and is nobody's fault, so it should not count against the IP either.
+        if (e?.extra?.faucetCooldown) for (const give of spentIp) give();
+        throw e;
       }
-      const { hash, receipt } = await send(request);
-      return { hash, status: receipt.status, recipient: b.address };
     },
   };
 }

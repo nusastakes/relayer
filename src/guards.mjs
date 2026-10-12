@@ -80,6 +80,11 @@ export function createRateLimiter({ windowMs, max, now = () => Date.now() }) {
       b.count += 1;
       return true;
     },
+    /** Gives back one use, for requests that failed before costing anything. */
+    refund(key) {
+      const b = buckets.get(key);
+      if (b && b.count > 0) b.count -= 1;
+    },
     retryAfterMs(key) {
       const b = buckets.get(key);
       return b ? Math.max(0, windowMs - (now() - b.start)) : 0;

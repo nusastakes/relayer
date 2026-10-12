@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // End-to-end check of the core loop on Monad testnet. It sends real testnet transactions.
 //
-//   RELAYER_PRIVATE_KEY=0x… node scripts/e2e-testnet.mjs
+//   RELAYER_PRIVATE_KEY=0x… node scripts/e2e-testnet.mjs                 # starts a local relayer; the key is also the mayor
+//   RELAYER_URL=https://… node scripts/e2e-testnet.mjs                   # tests a hosted relayer; needs no key: the mayor is a
+//                                                                         # new wallet that gets its MON from /gas-drip
 //
 // Steps: found a city (the relayer key acts as mayor) -> a brand-new resident with NO MON gets AUSD through the
 // relayer's /faucet -> the resident signs an EIP-2612 permit -> the relayer submits depositWithPermit through /deposit
@@ -60,24 +62,45 @@ async function post(base, path, body) {
   throw new Error(`${path}: still busy after retries`);
 }
 
-const relayer = buildRelayerFromEnv();
-const server = createHttpServer(relayer, { allowedOrigins: ["*"] });
-await new Promise((r) => server.listen(0, "127.0.0.1", r));
-const base = `http://127.0.0.1:${server.address().port}`;
+const REMOTE = process.env.RELAYER_URL?.replace(/\/$/, "");
+let server;
+let base = REMOTE;
+if (!REMOTE) {
+  const relayer = buildRelayerFromEnv();
+  server = createHttpServer(relayer, { allowedOrigins: ["*"] });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  base = `http://127.0.0.1:${server.address().port}`;
+}
 
-const mayor = privateKeyToAccount(process.env.RELAYER_PRIVATE_KEY);
+const mayor = REMOTE ? privateKeyToAccount(generatePrivateKey()) : privateKeyToAccount(process.env.RELAYER_PRIVATE_KEY);
 const mayorWallet = createWalletClient({ account: mayor, chain, transport: http(RPC) });
 const resident = privateKeyToAccount(generatePrivateKey());
 const result = { chainId: 10143, mayor: mayor.address, resident: resident.address, txs: {} };
 
+/** Monad needs balance >= gas limit x maxFeePerGas, so use a tight cap: 1.5x base fee plus tip. */
+async function tightFees() {
+  const block = await pub.getBlock();
+  const tip = await pub.estimateMaxPriorityFeePerGas().catch(() => 0n);
+  return { maxFeePerGas: (block.baseFeePerGas * 3n) / 2n + tip, maxPriorityFeePerGas: tip };
+}
+
 try {
+  log("relayer:", base);
   log("health:", await (await fetch(base + "/health")).json());
+
+  if (REMOTE) {
+    log("\n0. the mayor is a new wallet with no MON: it asks the relayer for a gas drip");
+    const drip = await post(base, "/gas-drip", { address: mayor.address });
+    result.txs.gasDrip = drip.hash;
+    log(`  mayor ${mayor.address} received ${drip.amountWei} wei (tx ${drip.hash}); balance now ${await pub.getBalance({ address: mayor.address })}`);
+    await sleep(3);
+  }
 
   log("\n1. mayor founds a city");
   const createArgs = [CITY_NAME, "E2E", 1000, [MIRROR_IMPL], "ipfs://e2e"];
   // Monad charges the gas LIMIT, so estimate instead of using a round number.
   const createGas = ((await pub.estimateContractGas({ address: FACTORY, abi: factoryAbi, functionName: "createCity", args: createArgs, account: mayor })) * 11n) / 10n;
-  let hash = await mayorWallet.writeContract({ address: FACTORY, abi: factoryAbi, functionName: "createCity", args: createArgs, gas: createGas });
+  let hash = await mayorWallet.writeContract({ address: FACTORY, abi: factoryAbi, functionName: "createCity", args: createArgs, gas: createGas, ...(await tightFees()) });
   let receipt = await pub.waitForTransactionReceipt({ hash });
   const [created] = parseEventLogs({ abi: factoryAbi, eventName: "CityCreated", logs: receipt.logs });
   const vault = created.args.vault;
@@ -114,7 +137,7 @@ try {
   if (shares === 0n || monAfter !== 0n) throw new Error("deposit did not behave as expected");
 
   log("\n4. mayor moves half of the city into the simulated-yield adapter");
-  hash = await mayorWallet.writeContract({ address: vault, abi: vaultAbi, functionName: "rebalance", args: ["0x0000000000000000000000000000000000000000", mirror, DEPOSIT / 2n, "0x" + "00".repeat(31) + "01"], gas: 400_000n });
+  hash = await mayorWallet.writeContract({ address: vault, abi: vaultAbi, functionName: "rebalance", args: ["0x0000000000000000000000000000000000000000", mirror, DEPOSIT / 2n, "0x" + "00".repeat(31) + "01"], gas: 400_000n, ...(await tightFees()) });
   receipt = await pub.waitForTransactionReceipt({ hash });
   result.txs.rebalance = hash;
   log(`  rebalance tx ${hash} ${receipt.status}; adapter principal ${fmt(await pub.readContract({ address: mirror, abi: mirrorAbi, functionName: "principal" }))}`);
@@ -158,5 +181,5 @@ try {
   console.error(JSON.stringify(result, null, 2));
   process.exitCode = 1;
 } finally {
-  server.close();
+  server?.close();
 }

@@ -104,7 +104,7 @@ function depositLog(shares) {
   return { address: VAULT, topics, data, blockNumber: 1n, transactionHash: "0x" + "ab".repeat(32), transactionIndex: 0, blockHash: "0x" + "cd".repeat(32), logIndex: 0, removed: false };
 }
 
-function fakes({ isCity = true, room = 10n ** 12n, balance = 10n ** 18n, recipientBalance = 0n, estimate = 200_000n, simulateError = null, estimateError = null } = {}) {
+function fakes({ isCity = true, room = 10n ** 12n, balance = 10n ** 19n, recipientBalance = 0n, estimate = 200_000n, simulateError = null, estimateError = null } = {}) {
   const calls = { written: [], estimates: [] };
   const publicClient = {
     getBalance: async ({ address }) => (address === RELAYER ? balance : recipientBalance),
@@ -290,15 +290,15 @@ test("faucet: any other refusal is a 400 with the reason", async () => {
 test("gas drip: sends a fixed amount of MON to a poor wallet, once per day per address", async () => {
   const { relayer, calls } = relayerWith();
   const out = await relayer.gasDrip({ address: OWNER });
-  assert.equal(out.amountWei, "500000000000000000");
+  assert.equal(out.amountWei, "1000000000000000000");
   assert.equal(calls.sent[0].to, OWNER);
-  assert.equal(calls.sent[0].value, 500000000000000000n);
+  assert.equal(calls.sent[0].value, 1000000000000000000n);
   assert.equal(calls.sent[0].gas, 21000n);
   await assert.rejects(relayer.gasDrip({ address: OWNER }), (e) => e.status === 429);
 });
 
 test("gas drip: refuses a wallet that already has enough MON, and the relayer itself", async () => {
-  const rich = relayerWith({ recipientBalance: 10n ** 18n }).relayer;
+  const rich = relayerWith({ recipientBalance: 8n * 10n ** 17n }).relayer;
   await assert.rejects(rich.gasDrip({ address: OWNER }), (e) => e.status === 400 && /no drip needed/.test(e.message));
   const { relayer } = relayerWith();
   await assert.rejects(relayer.gasDrip({ address: RELAYER }), (e) => e.status === 400);
@@ -361,4 +361,36 @@ test("allowed origins parse a comma-separated list and default to the local dev 
   assert.deepEqual(parseAllowedOrigins("https://a.example, https://b.example"), ["https://a.example", "https://b.example"]);
   assert.deepEqual(parseAllowedOrigins(undefined), ["http://localhost:3000"]);
   assert.deepEqual(parseAllowedOrigins("*"), ["*"]);
+});
+
+// ---------------------------------------------------------------- failed requests must not use up allowances
+
+test("a faucet cooldown does not burn the caller's allowance, so polite retries are never locked out", async () => {
+  const f = fakes({ simulateError: "execution reverted: MaxFrequencyExceeded" });
+  const relayer = createRelayer({ ...f, config: { factory: FACTORY, faucet: FAUCET }, now: () => 1_000_000_000_000 });
+  const ctx = { ip: "203.0.113.50" };
+  for (let i = 0; i < 8; i++) {
+    await assert.rejects(relayer.faucet({ address: OWNER }, ctx), (e) => e.status === 429 && e.extra.retryAfterSeconds === 20 && /faucet was used/.test(e.message));
+  }
+  // once the faucet is free again the same caller gets through
+  f.publicClient.simulateContract = async () => {};
+  const out = await relayer.faucet({ address: OWNER }, ctx);
+  assert.equal(out.status, "success");
+});
+
+test("a deposit that would fail does not use up the owner's allowance", async () => {
+  const f = fakes({ estimateError: "execution reverted: PermitNotHonoured" });
+  const relayer = createRelayer({ ...f, config: { factory: FACTORY, faucet: FAUCET }, now: () => 1_000_000_000_000 });
+  for (let i = 0; i < 6; i++) await assert.rejects(relayer.deposit(goodBody()), (e) => e.status === 400 && /would fail/.test(e.message));
+  f.publicClient.estimateContractGas = async () => 200_000n;
+  const out = await relayer.deposit(goodBody());
+  assert.equal(out.status, "success");
+});
+
+test("failed requests still count against the client IP, so invalid-request spam is bounded", async () => {
+  const f = fakes({ estimateError: "execution reverted: nope" });
+  const relayer = createRelayer({ ...f, config: { factory: FACTORY, faucet: FAUCET }, now: () => 1_000_000_000_000 });
+  const ctx = { ip: "203.0.113.60" };
+  for (let i = 0; i < 30; i++) await assert.rejects(relayer.deposit(goodBody({ owner: ADDR(1000 + i) }), ctx), (e) => e.status === 400);
+  await assert.rejects(relayer.deposit(goodBody({ owner: ADDR(5000) }), ctx), (e) => e.status === 429 && /this address/.test(e.message));
 });

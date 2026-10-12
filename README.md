@@ -3,7 +3,7 @@
 Relayer gas dan keeper APY untuk **Nusastakes** (game kota di Monad: setiap kota adalah vault ERC-4626).
 
 > **Status:** keduanya sudah ada dan diuji di Monad testnet. Relayer membayar gas setor dan tarik penduduk lewat
-> `permit`; keeper menulis APY vault AUSD mainnet ke kontrak `ApyFeed`. Siap di-host sebagai satu layanan (Railway).
+> `permit`; keeper menulis APY vault AUSD mainnet ke kontrak `ApyFeed`. Berjalan di Railway: https://relayer-production-39e1.up.railway.app (testnet).
 
 ## Relayer deposit (`src/server.mjs`)
 
@@ -17,7 +17,7 @@ tangan permit), siapa pun pengirimnya.
 | `POST /deposit` | `{ vault, owner, assets, deadline, v, r, s }` | `{ hash, status, shares, sharesOwner }` |
 | `POST /withdraw` | `{ vault, owner, shares, deadline, v, r, s }` (permit atas **share** kota) | `{ hash, status, assets, receiver }`; aset selalu dibayar ke `owner` |
 | `POST /faucet` | `{ address }` (hanya testnet) | `{ hash, status, recipient }`; `429` dengan `retryAfterSeconds` bila faucet baru dipakai |
-| `POST /gas-drip` | `{ address }` (hanya testnet) | `{ hash, recipient, amountWei }`: 0,5 MON untuk walikota atau kunci sesinya, sekali per alamat per hari, hanya bila saldo < 0,25 MON |
+| `POST /gas-drip` | `{ address }` (hanya testnet) | `{ hash, recipient, amountWei }`: 1 MON untuk walikota atau kunci sesinya (cukup untuk `createCity`, yang butuh saldo sekitar 0,63 MON), sekali per alamat per hari, hanya bila saldo < 0,7 MON |
 
 Perlindungan: vault harus dibuat oleh `CityFactory` (`isCity`), deadline permit minimal 20 detik ke depan, batas jumlah
 (`MAX_DEPOSIT_ASSETS`, bawaan 10.000 AUSD), batas laju per pemilik (3 per menit) dan global (30 per menit), transaksi
@@ -29,7 +29,7 @@ relayer tidak cukup. Pembatas laju per IP: setor dan tarik 30 per menit, faucet 
 
 ```
 npm install
-npm test                         # 52 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu)
+npm test                         # 55 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu)
 RELAYER_PRIVATE_KEY=0x… npm start   # server di :8787; HTTP, dan keeper bila RUN_KEEPER=1 (src/main.mjs)
 ```
 
@@ -40,10 +40,18 @@ proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INT
 
 ### Hosting di Railway
 
-`railway.json` menyiapkan perintah mulai (`npm start`), health check (`/health`), dan kebijakan restart. Satu layanan
-cukup (HTTP + keeper). Variabel di Railway: `RELAYER_PRIVATE_KEY` (rahasia, tidak boleh masuk repo), `RUN_KEEPER=1`,
-`TRUST_PROXY=1`, `ALLOWED_ORIGIN` (origin frontend); `PORT` diisi Railway. Dompet relayer hanya memegang MON testnet.
-Jalankan satu instance saja (batas laju di memori, satu pengirim nonce).
+Terpasang di proyek `nusastakes-relayer`, layanan `relayer`, lingkungan `production`: **https://relayer-production-39e1.up.railway.app**. Satu layanan
+(HTTP + keeper APY). `railway.json` menyiapkan perintah mulai (`npm start`), health check (`/health`), dan kebijakan
+restart. Variabel di Railway: `RELAYER_PRIVATE_KEY` (rahasia, diisi lewat stdin, tidak ada di repo), `RUN_KEEPER=1`,
+`TRUST_PROXY=1`, `NODE_ENV=production`, dan `ALLOWED_ORIGIN` (origin frontend dipisah koma; saat ini hanya
+`http://localhost:3000`); `PORT` diisi Railway. Dompet relayer hanya memegang MON testnet dan perlu diisi ulang bila
+habis (cek `GET /health`). Jalankan satu instance saja (batas laju di memori, satu pengirim nonce).
+
+```
+npx @railway/cli variable set ALLOWED_ORIGIN=https://app.example,http://localhost:3000 --service relayer
+npx @railway/cli up --service relayer --detach      # deploy ulang dari folder relayer/
+npx @railway/cli logs --service relayer
+```
 
 ### Uji ujung ke ujung di testnet
 
@@ -51,6 +59,9 @@ Jalankan satu instance saja (batas laju di memori, satu pengirim nonce).
 AUSD lewat `/faucet`, menandatangani `permit` EIP-712 untuk AUSD ("Agora Dollar" versi "1"), relayer menyetor lewat
 `/deposit`, walikota memindahkan setengah dana ke adapter yield simulasi, lalu penduduk menandatangani permit atas
 share dan menarik semuanya lewat `/withdraw`. Penduduk tidak pernah memegang MON.
+
+Untuk menguji relayer yang sudah di-host: `RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/e2e-testnet.mjs`. Walikotanya
+adalah dompet baru tanpa MON yang meminta `/gas-drip` lebih dulu.
 
 Hasil 13 Okt 2026 pada deploy ke-2 (kota `0x451b92604f6C1A51adf95b7Ce53a25A9398Ba6c2`): saldo MON penduduk tetap 0 dari
 awal sampai akhir, share (100 AUSD) tercetak ke penduduk, yield simulasi tumbuh (+1 satuan terkecil dalam 90 detik pada
