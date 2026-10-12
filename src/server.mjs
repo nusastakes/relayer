@@ -21,7 +21,7 @@
 //
 // Environment: RELAYER_PRIVATE_KEY (required), MONAD_TESTNET_RPC, FACTORY_ADDRESS, AUSD_FAUCET (set to "" to disable
 // /faucet), PORT (default 8787), ALLOWED_ORIGIN (CORS, comma-separated, default http://localhost:3000), TRUST_PROXY=1 behind a proxy such as Railway, MAX_DEPOSIT_ASSETS,
-// INDEX_FILE (default ./data/index.json), INDEXER=0 / ECONOMY=0 to turn those off, INDEX_RANGE (logs per request, default 100; some RPCs allow 10000), INDEX_START_BLOCK, HUMAS_ADDRESS (turns the Humas on),
+// INDEX_FILE (default ./data/index.json), INDEXER=0 / ECONOMY=0 to turn those off, INDEX_RANGE (logs per request, default 100; some RPCs allow 10000), INDEX_RPC (a separate RPC for getLogs only, e.g. Envio HyperRPC), INDEX_START_BLOCK, HUMAS_ADDRESS (turns the Humas on),
 // BOOK_FILE (default ./data/book.json, "" turns /book off), ANALYST_PRIVATE_KEY (turns the Analyst on), PROPOSALS_FILE (default ./data/proposals.json), ANTHROPIC_API_KEY and/or XKIRO_API_KEY (optional, they write the reasons; Anthropic is tried first), ANALYST_LLM=0 to ignore the keys, ANALYST_LLM_MODEL, XKIRO_MODEL,
 // STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off).
 
@@ -90,6 +90,8 @@ export function buildRelayerFromEnv(env = process.env) {
       ? null
       : createIndexer({
           publicClient,
+          // INDEX_RPC: an RPC used only for getLogs, for example Envio HyperRPC (https://monad-testnet.rpc.hypersync.xyz/<token>) with a larger INDEX_RANGE.
+          logsClient: env.INDEX_RPC ? createPublicClient({ chain, transport: viemHttp(env.INDEX_RPC) }) : undefined,
           file: indexFile || undefined,
           config: { factory, startBlock: env.INDEX_START_BLOCK || DEFAULTS.factoryDeployBlock, range: env.INDEX_RANGE ? Number(env.INDEX_RANGE) : 100 },
         });

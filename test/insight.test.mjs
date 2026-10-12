@@ -118,6 +118,16 @@ test("indexer: walks in chunks of the configured range and stops after the reque
   assert.equal(index.status().complete, true);
 });
 
+test("indexer: getLogs can go to a separate client while other reads stay on the main one", async () => {
+  const main = chain({ logs: [] , head: 150 });
+  const logsOnly = chain({ logs: script(), head: 150 });
+  main.publicClient.getLogs = async () => { throw new Error("the main client must not serve getLogs"); };
+  const index = createIndexer({ publicClient: main.publicClient, logsClient: logsOnly.publicClient, config: { factory: FACTORY, startBlock: 100, range: 100 } });
+  await index.step();
+  assert.ok(logsOnly.requests.length > 0);
+  assert.equal(index.cities().length, 1, "the city created at block 120 was found through the logs client");
+});
+
 test("indexer: resumes from its file and does not read old blocks again", async () => {
   const dir = mkdtempSync(join(tmpdir(), "index-"));
   try {

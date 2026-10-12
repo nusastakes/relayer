@@ -37,7 +37,9 @@ const factoryAbi = parseAbi([
 
 const lower = (a) => a.toLowerCase();
 
-export function createIndexer({ publicClient, config, file, now = () => Date.now() }) {
+export function createIndexer({ publicClient, logsClient = publicClient, config, file, now = () => Date.now() }) {
+  // `logsClient` serves getLogs only, so a provider with a wider block range (for example Envio HyperRPC) can be plugged in
+  // without moving the other reads.
   const c = {
     factory: config.factory,
     startBlock: BigInt(config.startBlock),
@@ -144,7 +146,7 @@ export function createIndexer({ publicClient, config, file, now = () => Date.now
   }
 
   async function fetchChunk(fromBlock, toBlock) {
-    const logs = await publicClient.getLogs({ address: addresses(), fromBlock, toBlock });
+    const logs = await logsClient.getLogs({ address: addresses(), fromBlock, toBlock });
     return parseEventLogs({ abi: indexAbi, logs, strict: false });
   }
 
