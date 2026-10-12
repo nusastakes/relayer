@@ -47,8 +47,9 @@ mematikan `/style`).
 Terpasang di proyek `nusastakes-relayer`, layanan `relayer`, lingkungan `production`: **https://relayer-production-39e1.up.railway.app**. Satu layanan
 (HTTP + keeper APY). `railway.json` menyiapkan perintah mulai (`npm start`), health check (`/health`), dan kebijakan
 restart. Variabel di Railway: `RELAYER_PRIVATE_KEY` (rahasia, diisi lewat stdin, tidak ada di repo), `RUN_KEEPER=1`,
-`TRUST_PROXY=1`, `NODE_ENV=production`, dan `ALLOWED_ORIGIN` (origin frontend dipisah koma; saat ini hanya
-`http://localhost:3000`); `PORT` diisi Railway. Dompet relayer hanya memegang MON testnet dan perlu diisi ulang bila
+`TRUST_PROXY=1`, `NODE_ENV=production`, dan `ALLOWED_ORIGIN` (origin frontend dipisah koma; saat ini
+`http://localhost:3000,http://localhost:3100`), dan `STYLE_FILE=/data/styles.json` di volume `relayer-volume` yang dipasang di `/data`
+(`railway volume --service <ID layanan> add --mount-path /data`; nama layanan membuat CLI panic, pakai ID); `PORT` diisi Railway. Dompet relayer hanya memegang MON testnet dan perlu diisi ulang bila
 habis (cek `GET /health`). Jalankan satu instance saja (batas laju di memori, satu pengirim nonce).
 
 ```
@@ -66,6 +67,8 @@ share dan menarik semuanya lewat `/withdraw`. Penduduk tidak pernah memegang MON
 
 Untuk menguji relayer yang sudah di-host: `RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/e2e-testnet.mjs`. Walikotanya
 adalah dompet baru tanpa MON yang meminta `/gas-drip` lebih dulu.
+
+Gaya kota di instance yang di-host: `VAULT=0x… DEPLOYER_PRIVATE_KEY=0x… RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/style-check.mjs sakura.7` (kuncinya harus milik walikota kota itu). Pada 13 Okt 2026 uji ini lulus dan kodenya masih ada setelah redeploy.
 
 Hasil 13 Okt 2026 pada deploy ke-2 (kota `0x451b92604f6C1A51adf95b7Ce53a25A9398Ba6c2`): saldo MON penduduk tetap 0 dari
 awal sampai akhir, share (100 AUSD) tercetak ke penduduk, yield simulasi tumbuh (+1 satuan terkecil dalam 90 detik pada
@@ -99,7 +102,7 @@ Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`,
 - Akun Mera adalah EOA biasa menurut dokumentasi resmi dan `toViemAccount` mendukung `signTypedData`, tetapi permit
   belum ditandatangani dengan Mera sungguhan.
 - Gaya kota (`/style`) hanya tampilan dan tidak memengaruhi dana. Isinya disimpan di berkas JSON milik server: tidak bisa
-  diperiksa orang luar seperti event onchain, dan hilang bila deploy ulang tanpa volume. Tanda tangan walikota memastikan
+  diperiksa orang luar seperti event onchain, dan hilang bila deploy ulang tanpa volume (di Railway sudah dipasang volume di `/data`). Tanda tangan walikota memastikan
   hanya walikota yang mengubah, tetapi operator relayer tetap bisa mengubah berkasnya. Tempat yang benar untuk jangka
   panjang adalah `CityVault.setStyle(bytes32)` di kontrak v3.
 - Relayer belum diuji di bawah beban atau serangan sungguhan; pembatas laju hanya di memori satu proses.
