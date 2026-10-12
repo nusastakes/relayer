@@ -42,8 +42,22 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
   const perOwnerWithdraw = createRateLimiter({ windowMs: 60_000, max: 3, now });
   const perFaucetAddress = createRateLimiter({ windowMs: 10 * 60_000, max: 1, now });
   const perDripAddress = createRateLimiter({ windowMs: 24 * 3_600_000, max: 1, now });
-  const dripGlobal = createRateLimiter({ windowMs: 3_600_000, max: config.gasDripsPerHour ?? 20, now });
+  const dripGlobal = createRateLimiter({ windowMs: 3_600_000, max: config.gasDripsPerHour ?? 10, now });
   const global = createRateLimiter({ windowMs: 60_000, max: config.globalPerMinute ?? 30, now });
+  // Per client IP (only when the HTTP layer knows it). A public relayer cannot rely on per-address limits alone,
+  // because anybody can make fresh addresses for free.
+  const ipLimits = {
+    deposit: createRateLimiter({ windowMs: 60_000, max: 30, now }),
+    withdraw: createRateLimiter({ windowMs: 60_000, max: 30, now }),
+    faucet: createRateLimiter({ windowMs: 3_600_000, max: 5, now }),
+    gasDrip: createRateLimiter({ windowMs: 24 * 3_600_000, max: 3, now }),
+  };
+  function guardIp(kind, ip) {
+    if (!ip) return;
+    if (!ipLimits[kind].hit(ip)) {
+      throw new HttpError(429, `too many ${kind} requests from this address`, { retryAfterSeconds: Math.ceil(ipLimits[kind].retryAfterMs(ip) / 1000) });
+    }
+  }
 
   function guardRate(limiter, key, label) {
     if (!global.hit("all")) throw new HttpError(429, "relayer is busy, try again shortly", { retryAfterSeconds: 10 });
@@ -96,7 +110,8 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     },
 
     /** POST /deposit */
-    async deposit(rawBody) {
+    async deposit(rawBody, ctx = {}) {
+      guardIp("deposit", ctx.ip);
       const b = parseDepositBody(rawBody);
       const nowSeconds = BigInt(Math.floor(now() / 1000));
       if (b.deadline < nowSeconds + BigInt(c.minDeadlineSeconds)) throw new HttpError(400, "permit deadline is too close or already passed");
@@ -126,7 +141,8 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     },
 
     /** POST /withdraw: redeem the owner's shares with a signed share permit; the assets go to the owner. */
-    async withdraw(rawBody) {
+    async withdraw(rawBody, ctx = {}) {
+      guardIp("withdraw", ctx.ip);
       const b = parseWithdrawBody(rawBody);
       const nowSeconds = BigInt(Math.floor(now() / 1000));
       if (b.deadline < nowSeconds + BigInt(c.minDeadlineSeconds)) throw new HttpError(400, "permit deadline is too close or already passed");
@@ -159,7 +175,8 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
      * example a mayor founding a city or a session key rebalancing. Once per address per day, only to wallets that
      * hold less than `gasDripBelowWei`, and capped per hour overall.
      */
-    async gasDrip(rawBody) {
+    async gasDrip(rawBody, ctx = {}) {
+      guardIp("gasDrip", ctx.ip);
       const b = parseFaucetBody(rawBody);
       if (b.address.toLowerCase() === account.address.toLowerCase()) throw new HttpError(400, "that is the relayer itself");
       const held = await publicClient.getBalance({ address: b.address });
@@ -177,7 +194,8 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     },
 
     /** POST /faucet (testnet only): free AUSD for a new resident, gas paid by the relayer. */
-    async faucet(rawBody) {
+    async faucet(rawBody, ctx = {}) {
+      guardIp("faucet", ctx.ip);
       const b = parseFaucetBody(rawBody);
       if (!c.faucet) throw new HttpError(404, "faucet is not configured");
       guardRate(perFaucetAddress, b.address.toLowerCase(), "faucet");

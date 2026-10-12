@@ -61,7 +61,7 @@ async function post(base, path, body) {
 }
 
 const relayer = buildRelayerFromEnv();
-const server = createHttpServer(relayer, { allowedOrigin: "*" });
+const server = createHttpServer(relayer, { allowedOrigins: ["*"] });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
 

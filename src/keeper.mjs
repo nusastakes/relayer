@@ -146,6 +146,8 @@ async function step(o) {
   if (receipt.status !== "success") throw new Error("setApy transaction reverted");
 }
 
+export { parseArgs, step };
+
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   if (!o.loop) return step(o);
@@ -159,7 +161,9 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(e.shortMessage || e.message);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((e) => {
+    console.error(e.shortMessage || e.message);
+    process.exit(1);
+  });
+}

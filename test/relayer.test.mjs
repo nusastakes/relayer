@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { encodeAbiParameters, encodeEventTopics, parseAbi } from "viem";
 import { HttpError, Mutex, createRateLimiter, parseDepositBody, parseFaucetBody, parseWithdrawBody } from "../src/guards.mjs";
 import { createRelayer, vaultAbi } from "../src/relayer.mjs";
+import { clientIp, parseAllowedOrigins } from "../src/server.mjs";
 
 const ADDR = (n) => "0x" + n.toString(16).padStart(40, "0");
 const OWNER = ADDR(0xa11ce);
@@ -322,4 +323,42 @@ test("health reports the relayer address and balance", async () => {
   const h = await relayer.health();
   assert.equal(h.relayer, RELAYER);
   assert.equal(h.ok, true);
+});
+
+// ---------------------------------------------------------------- per-IP limits and HTTP helpers
+
+test("per-IP limits stop one client from making many fresh addresses", async () => {
+  const { relayer } = relayerWith();
+  const ctx = { ip: "203.0.113.7" };
+  // gas drip: 3 per day per IP, even for different addresses
+  await relayer.gasDrip({ address: ADDR(11) }, ctx);
+  await relayer.gasDrip({ address: ADDR(12) }, ctx);
+  await relayer.gasDrip({ address: ADDR(13) }, ctx);
+  await assert.rejects(relayer.gasDrip({ address: ADDR(14) }, ctx), (e) => e.status === 429 && /this address/.test(e.message));
+  // another client is unaffected
+  await relayer.gasDrip({ address: ADDR(15) }, { ip: "198.51.100.9" });
+});
+
+test("per-IP limit on the faucet is 5 an hour", async () => {
+  const { relayer } = relayerWith();
+  const ctx = { ip: "203.0.113.8" };
+  for (let i = 0; i < 5; i++) await relayer.faucet({ address: ADDR(100 + i) }, ctx);
+  await assert.rejects(relayer.faucet({ address: ADDR(200) }, ctx), (e) => e.status === 429);
+});
+
+test("without a known IP (tests, local scripts) only the per-address and global limits apply", async () => {
+  const { relayer } = relayerWith();
+  for (let i = 0; i < 6; i++) await relayer.faucet({ address: ADDR(300 + i) });
+});
+
+test("client IP: X-Forwarded-For only counts behind a trusted proxy", () => {
+  const req = { headers: { "x-forwarded-for": "198.51.100.1, 10.0.0.2" }, socket: { remoteAddress: "10.0.0.2" } };
+  assert.equal(clientIp(req, true), "198.51.100.1");
+  assert.equal(clientIp(req, false), "10.0.0.2", "a spoofable header is ignored when not behind a proxy");
+});
+
+test("allowed origins parse a comma-separated list and default to the local dev server", () => {
+  assert.deepEqual(parseAllowedOrigins("https://a.example, https://b.example"), ["https://a.example", "https://b.example"]);
+  assert.deepEqual(parseAllowedOrigins(undefined), ["http://localhost:3000"]);
+  assert.deepEqual(parseAllowedOrigins("*"), ["*"]);
 });

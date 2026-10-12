@@ -11,7 +11,8 @@
     "keeper": "node src/keeper.mjs",
     "keeper:dry": "node src/keeper.mjs --dry",
     "test": "node --test test/",
-    "start": "node src/server.mjs"
+    "start": "node src/main.mjs",
+    "start:server": "node src/server.mjs"
   },
   "engines": {
     "node": ">=22"
