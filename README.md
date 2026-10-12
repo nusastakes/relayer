@@ -2,8 +2,8 @@
 
 Relayer gas dan keeper APY untuk **Nusastakes** (game kota di Monad: setiap kota adalah vault ERC-4626).
 
-> **Status: rencana, belum ada kode** (backlog B2.2 dan B2.9). Repo ini dipublikasikan lebih awal supaya riwayat
-> commit hackathon terlihat; isinya akan diisi di fase 2.
+> **Status:** keeper APY (B2.9) sudah ada dan berjalan di Monad testnet. Relayer gas untuk deposit (B2.2) masih
+> rencana.
 
 ## Tujuan
 
@@ -12,7 +12,34 @@ Relayer gas dan keeper APY untuk **Nusastakes** (game kota di Monad: setiap kota
 2. **Keeper APY**: menulis APY vault AUSD di mainnet ke kontrak `ApyFeed` di testnet, supaya yield simulasi
    (`MirrorYieldAdapter`) mengikuti pasar sungguhan.
 
-## Rencana
+## Keeper APY (sudah ada)
+
+`src/keeper.mjs` membaca APY vault AUSD di mainnet dan menulisnya ke `ApyFeed` di testnet, sehingga yield simulasi
+`MirrorYieldAdapter` mengikuti pasar sungguhan.
+
+- **Sumber utama:** kenaikan harga share vault Morpho "Grove x Steakhouse High Yield AUSD"
+  (`0x32841A8511D5c2c5b253f45668780B99139e476D`, mainnet) antara dua blok dalam jendela 3 hari
+  (`convertToAssets` pada blok sekarang dan blok 3 hari lalu), diannualkan sebagai bunga sederhana. Siapa pun bisa
+  memeriksa angkanya sendiri di chain. Cadangan: field `netApy` dari API GraphQL Morpho bila RPC tidak bisa
+  membaca state lama.
+- **Penulisan:** `ApyFeed.setApy(sourceId, apyBps, observedAt)` dari kunci `RELAYER_PRIVATE_KEY`, yang harus menjadi
+  `updater` di feed. Ditulis hanya bila berubah >= 5 bps atau bacaan terakhir lebih tua dari 6 jam.
+- Contoh hasil (13 Okt 2026): 128 bps (1,28%) dari harga share 1,026067… ke 1,026175… dalam 259.200 detik; `apy`
+  Morpho melaporkan 1,29% dan `netApy` 1,50% (memasukkan reward).
+
+```
+npm install
+npm test                                  # tes hitung APY dan pencarian blok
+npm run keeper:dry                        # hitung dan cetak, tidak mengirim apa pun
+RELAYER_PRIVATE_KEY=0x… npm run keeper    # tulis sekali
+RELAYER_PRIVATE_KEY=0x… node src/keeper.mjs --loop --interval 3600
+```
+
+Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`, `APY_SOURCE_VAULT`, `APY_SOURCE_ID`.
+Kunci tidak pernah ditulis ke file yang dilacak git. Belum ada layanan yang menjalankan `--loop` terus-menerus; itu
+perlu dijalankan di mesin atau server.
+
+## Rencana relayer deposit
 
 - Layanan Node kecil dengan `viem`.
 - Menerima `permit` yang sudah ditandatangani penduduk (`owner`, `assets`, `deadline`, `v`, `r`, `s`), lalu memanggil
@@ -43,7 +70,7 @@ deterministik kontrak.
 
 ## Komponen yang sudah ada sebelumnya
 
-Belum ada dependensi. Rencana: `viem`.
+`viem` 2.57.4 (MIT).
 
 ## Lisensi
 

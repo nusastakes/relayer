@@ -2,5 +2,17 @@
   "name": "city-relayer",
   "version": "0.0.0",
   "private": true,
-  "description": "Relayer gas untuk deposit dengan permit. Belum ada kode; lihat README.md."
+  "description": "Relayer gas untuk deposit dengan permit dan keeper APY untuk ApyFeed. Keeper APY sudah ada; relayer deposit masih rencana (lihat README.md).",
+  "dependencies": {
+    "viem": "2.57.4"
+  },
+  "type": "module",
+  "scripts": {
+    "keeper": "node src/keeper.mjs",
+    "keeper:dry": "node src/keeper.mjs --dry",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=22"
+  }
 }
