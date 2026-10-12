@@ -228,14 +228,17 @@ export async function askForReason({ provider = "anthropic", apiKey, model, base
   }
 }
 
-/** Tries the providers in order and returns the first usable text. */
-export async function askForReasonAny(providers, facts) {
+/** Tries the providers in order and returns the first text that `accept` approves (any text by default). */
+export async function askForReasonAny(providers, facts, accept = () => true) {
   for (const p of providers) {
     const text = await askForReason(p, facts);
-    if (text) return text;
+    if (text && accept(text)) return text;
   }
   return null;
 }
+
+/** The reason must state the amount, written with a dot or a comma ("325.00" or "325,00"), and stay short. */
+export const mentionsAmount = (text, amountText) => text.length <= 600 && (text.includes(amountText) || text.includes(amountText.replace(".", ",")));
 
 // ------------------------------------------------------------------------------------------------ the bot
 
@@ -326,7 +329,9 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
     const amountText = formatAssets(decision.amount);
     let reason = fallback;
     if (providers.length) {
-      const text = await askForReasonAny(providers, {
+      const text = await askForReasonAny(
+        providers,
+        {
         action: decision.action,
         amountText,
         idleText: formatAssets(snapshot.idle),
@@ -334,9 +339,11 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
         apyPercent: formatPercent(snapshot.apyBps),
         minApyPercent: formatPercent(BigInt((c.params.minApyBps ?? DEFAULT_PARAMS.minApyBps))),
         idleBufferPercent: formatPercent(c.params.idleBufferBps ?? DEFAULT_PARAMS.idleBufferBps),
-      });
-      // The numbers are the rules'; text that does not even mention the amount is not trusted.
-      if (text && text.includes(amountText) && text.length <= 600) reason = text;
+        },
+        // The numbers are the rules'; text that does not even mention the amount is not trusted, and the next provider is tried.
+        (t) => mentionsAmount(t, amountText),
+      );
+      if (text) reason = text;
     }
     const plan = buildPlan({ city, decision, reason, snapshot, analyst: account.address, createdAt: nowSeconds() });
     const planHash = planHashOf(plan);

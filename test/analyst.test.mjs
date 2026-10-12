@@ -9,6 +9,7 @@ import {
   ZERO_ADDRESS,
   askForReason,
   askForReasonAny,
+  mentionsAmount,
   buildPlan,
   createAnalyst,
   createPlanStore,
@@ -175,6 +176,20 @@ test("askForReasonAny: falls through to the next provider when the first fails",
   assert.deepEqual(calls, ["https://api.anthropic.com/v1/messages", "https://api.xkiro.com/v1/messages"]);
   assert.equal(await askForReasonAny([down], {}), null);
   assert.equal(await askForReasonAny([], {}), null);
+});
+
+test("mentionsAmount: accepts a dot or a comma, rejects other amounts and long texts", () => {
+  assert.equal(mentionsAmount("Pindahkan 325.00 AUSD", "325.00"), true);
+  assert.equal(mentionsAmount("Pindahkan 325,00 AUSD", "325.00"), true);
+  assert.equal(mentionsAmount("Pindahkan 9999 AUSD", "325.00"), false);
+  assert.equal(mentionsAmount("x".repeat(601) + "325.00", "325.00"), false);
+});
+
+test("askForReasonAny: a provider whose text fails the check is skipped for the next one", async () => {
+  const mk = (provider, text) => ({ provider, apiKey: "k", fetchImpl: async () => ({ ok: true, json: async () => ({ content: [{ type: "text", text }] }) }) });
+  const accept = (t) => mentionsAmount(t, "325.00");
+  assert.equal(await askForReasonAny([mk("anthropic", "tanpa angka"), mk("xkiro", "Pindahkan 325,00 AUSD")], {}, accept), "Pindahkan 325,00 AUSD");
+  assert.equal(await askForReasonAny([mk("anthropic", "tanpa angka")], {}, accept), null);
 });
 
 test("askForReason: any failure or a missing key means null, never a throw", async () => {
