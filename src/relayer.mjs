@@ -35,6 +35,12 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     maxGas: config.maxGas ?? 1_500_000n,
     gasDripWei: config.gasDripWei ?? 10n ** 18n, // 1 MON: founding a city needs about 0.63 MON in the wallet at a tight fee cap
     gasDripBelowWei: config.gasDripBelowWei ?? 7n * 10n ** 17n, // only to wallets holding less than 0.7 MON
+    // Spend controls. The per-IP limits stop one client; these stop everybody together from emptying the wallet.
+    dripFloorWei: config.dripFloorWei ?? 2n * 10n ** 18n, // drips pause when they would leave less than this for sponsored deposits
+    gasDripsPerDay: config.gasDripsPerDay ?? 40,
+    maxQueue: config.maxQueue ?? 10, // transactions running or waiting; more are refused instead of piling up
+    dailyGasCapWei: config.dailyGasCapWei ?? 5n * 10n ** 18n, // upper bound of gas the relayer will commit to sponsored transactions per day
+    lowFundsWei: config.lowFundsWei ?? 2n * 10n ** 18n, // /health reports lowFunds below this
   };
   const account = walletClient.account;
   const mutex = new Mutex();
@@ -43,6 +49,7 @@ export function createRelayer({ publicClient, walletClient, config, style = null
   const perFaucetAddress = createRateLimiter({ windowMs: 10 * 60_000, max: 1, now });
   const perDripAddress = createRateLimiter({ windowMs: 24 * 3_600_000, max: 1, now });
   const dripGlobal = createRateLimiter({ windowMs: 3_600_000, max: config.gasDripsPerHour ?? 10, now });
+  const dripDaily = createRateLimiter({ windowMs: 24 * 3_600_000, max: c.gasDripsPerDay, now });
   const global = createRateLimiter({ windowMs: 60_000, max: config.globalPerMinute ?? 30, now });
   // Per client IP (only when the HTTP layer knows it). A public relayer cannot rely on per-address limits alone,
   // because anybody can make fresh addresses for free.
@@ -50,12 +57,15 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     deposit: createRateLimiter({ windowMs: 60_000, max: 30, now }),
     withdraw: createRateLimiter({ windowMs: 60_000, max: 30, now }),
     faucet: createRateLimiter({ windowMs: 3_600_000, max: 5, now }),
+    // Counts every faucet call, including those the faucet's own cooldown refuses (which refund the limit above), so
+    // polling the endpoint is not free.
+    faucetAttempts: createRateLimiter({ windowMs: 3_600_000, max: 60, now }),
     gasDrip: createRateLimiter({ windowMs: 24 * 3_600_000, max: 3, now }),
   };
   function guardIp(kind, ip, spent = []) {
     if (!ip) return;
     if (!ipLimits[kind].hit(ip)) {
-      throw new HttpError(429, `too many ${kind} requests from this address`, { retryAfterSeconds: Math.ceil(ipLimits[kind].retryAfterMs(ip) / 1000) });
+      throw new HttpError(429, `too many ${kind === "faucetAttempts" ? "faucet" : kind} requests from this address`, { retryAfterSeconds: Math.ceil(ipLimits[kind].retryAfterMs(ip) / 1000) });
     }
     spent.push(() => ipLimits[kind].refund(ip));
   }
@@ -81,6 +91,27 @@ export function createRelayer({ publicClient, walletClient, config, style = null
       for (const give of spent) give();
       throw e;
     }
+  }
+
+  /** Gas committed to sponsored transactions in the last 24 hours, as an upper bound (gas limit x max fee). */
+  const spendLog = [];
+  function spentLast24h() {
+    const cutoff = now() - 86_400_000;
+    while (spendLog.length && spendLog[0].at < cutoff) spendLog.shift();
+    return spendLog.reduce((sum, entry) => sum + entry.wei, 0n);
+  }
+  /** Reserves part of the daily budget; the returned function gives it back if the transaction was never sent. */
+  function reserveSpend(wei) {
+    if (spentLast24h() + wei > c.dailyGasCapWei) throw new HttpError(503, "the relayer's daily gas budget is used up, try again later", { retryAfterSeconds: 3600 });
+    const entry = { at: now(), wei };
+    spendLog.push(entry);
+    return () => {
+      const i = spendLog.indexOf(entry);
+      if (i >= 0) spendLog.splice(i, 1);
+    };
+  }
+  function requireQueueRoom() {
+    if (mutex.depth >= c.maxQueue) throw new HttpError(503, "the relayer has too many transactions waiting, try again shortly", { retryAfterSeconds: 5 });
   }
 
   async function requireFunds(needed = 0n) {
@@ -111,8 +142,16 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     if (gas > c.maxGas) gas = c.maxGas;
     const fees = await feeCaps();
     if (fees.maxFeePerGas) await requireFunds(gas * fees.maxFeePerGas);
+    requireQueueRoom();
+    const release = reserveSpend(gas * (fees.maxFeePerGas ?? 0n));
     return mutex.run(async () => {
-      const hash = await walletClient.writeContract({ ...request, gas, ...fees });
+      let hash;
+      try {
+        hash = await walletClient.writeContract({ ...request, gas, ...fees });
+      } catch (e) {
+        release(); // nothing was sent
+        throw e;
+      }
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
       return { hash, receipt };
     });
@@ -132,11 +171,20 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     economy,
 
     async health() {
-      const [balance, head] = await Promise.all([publicClient.getBalance({ address: account.address }), publicClient.getBlock()]);
+      const [balance, head, analystBalance] = await Promise.all([
+        publicClient.getBalance({ address: account.address }),
+        publicClient.getBlock(),
+        analyst ? analyst.balance() : Promise.resolve(null),
+      ]);
       return {
         ok: true,
         relayer: account.address,
         balanceWei: balance.toString(),
+        // True when the relayer (or the Analyst) is nearly out of MON and needs a top-up before the demo.
+        lowFunds: balance < c.lowFundsWei || (analystBalance !== null && analystBalance < c.lowFundsWei / 4n),
+        ...(analystBalance !== null ? { analystBalanceWei: analystBalance.toString() } : {}),
+        queueDepth: mutex.depth,
+        gasSpentLast24hWei: spentLast24h().toString(),
         block: head.number.toString(),
         factory: c.factory,
         faucetEnabled: Boolean(c.faucet),
@@ -230,15 +278,25 @@ export function createRelayer({ publicClient, walletClient, config, style = null
       if (held >= c.gasDripBelowWei) throw new HttpError(400, `address already holds ${held} wei, no drip needed`);
       if (!dripGlobal.hit("all")) throw new HttpError(429, "gas drips are used up for this hour", { retryAfterSeconds: Math.ceil(dripGlobal.retryAfterMs("all") / 1000) });
       const spent = [() => dripGlobal.refund("all")];
+      if (!dripDaily.hit("all")) {
+        spent[0]();
+        throw new HttpError(429, "gas drips are used up for today", { retryAfterSeconds: Math.ceil(dripDaily.retryAfterMs("all") / 1000) });
+      }
+      spent.push(() => dripDaily.refund("all"));
       try {
         guardRate(perDripAddress, b.address.toLowerCase(), "gas-drip", spent);
       } catch (e) {
-        spent[0]();
+        for (const give of spent) give();
         throw e;
       }
       return refundingOnFailure(spent, async () => {
         const fees = await feeCaps();
-        await requireFunds(c.gasDripWei + 21_000n * (fees.maxFeePerGas ?? 0n));
+        const cost = c.gasDripWei + 21_000n * (fees.maxFeePerGas ?? 0n);
+        // Keep a reserve for sponsored deposits and withdrawals: drips are a convenience, those are the product.
+        const balance = await publicClient.getBalance({ address: account.address });
+        if (balance < cost + c.dripFloorWei) throw new HttpError(503, "gas drips are paused to keep the relayer funded for deposits", { retryAfterSeconds: 600 });
+        requireQueueRoom();
+        await requireFunds(cost);
         const hash = await mutex.run(async () => {
           const h = await walletClient.sendTransaction({ to: b.address, value: c.gasDripWei, gas: 21_000n, ...fees });
           await publicClient.waitForTransactionReceipt({ hash: h });
@@ -250,6 +308,7 @@ export function createRelayer({ publicClient, walletClient, config, style = null
 
     /** POST /faucet (testnet only): free AUSD for a new resident, gas paid by the relayer. */
     async faucet(rawBody, ctx = {}) {
+      guardIp("faucetAttempts", ctx.ip);
       const spentIp = [];
       guardIp("faucet", ctx.ip, spentIp);
       const b = parseFaucetBody(rawBody);

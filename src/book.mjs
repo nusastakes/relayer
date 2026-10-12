@@ -28,8 +28,11 @@ export const BOOK_TYPES = {
 export const BOOK_PRIMARY_TYPE = "BookEntry";
 
 export const MAX_CIPHERTEXT_BYTES = 16 * 1024;
-export const MAX_ENTRIES_PER_OWNER = 200;
-const MAX_OWNERS = 5000;
+export const MAX_ENTRIES_PER_OWNER = 100;
+/** The whole store lives in memory and is rewritten on every write, so it is capped in bytes, not only in entries. */
+export const MAX_BYTES_PER_OWNER = 1024 * 1024;
+export const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+const MAX_OWNERS = 1000;
 const ENTRY_ID = /^[a-zA-Z0-9._:-]{1,64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
@@ -55,19 +58,25 @@ export function parseBookBody(body) {
   return { owner, id: body.id, ciphertext: body.ciphertext.toLowerCase(), bytes, nonce: BigInt(rawNonce), signature: body.signature };
 }
 
-/** @param {{file?: string, now?: () => number, verify?: Function}} options */
-export function createBookStore({ file, now = () => Date.now(), verify = verifyTypedData } = {}) {
+/**
+ * @param {{file?: string, now?: () => number, verify?: Function, canWrite?: (owner: string) => boolean | Promise<boolean>}} options
+ * `canWrite` gates who may store anything at all: a signature from a fresh key proves nothing, so the server passes a check
+ * that the owner is a mayor or a depositor of a real city.
+ */
+export function createBookStore({ file, now = () => Date.now(), verify = verifyTypedData, canWrite = () => true } = {}) {
   /** @type {Map<string, {nonce: string, entries: {id: string, ciphertext: string, hash: string, bytes: number, createdAt: number}[]}>} */
   const owners = new Map();
   const mutex = new Mutex();
   const perOwner = createRateLimiter({ windowMs: 60_000, max: 20, now });
   const perIp = createRateLimiter({ windowMs: 60_000, max: 30, now });
   const global = createRateLimiter({ windowMs: 60_000, max: 120, now });
+  let totalBytes = 0;
 
   if (file) {
     try {
       const saved = JSON.parse(readFileSync(file, "utf8"));
       for (const [owner, value] of Object.entries(saved)) if (ADDRESS.test(owner) && Array.isArray(value?.entries)) owners.set(owner.toLowerCase(), value);
+      totalBytes = [...owners.values()].reduce((sum, book) => sum + book.entries.reduce((s, e) => s + e.bytes, 0), 0);
     } catch (e) {
       if (e?.code !== "ENOENT") console.error(`book file ${file} could not be read (${e?.message}); starting empty`);
     }
@@ -90,7 +99,6 @@ export function createBookStore({ file, now = () => Date.now(), verify = verifyT
       const b = parseBookBody(rawBody);
       if (!global.hit("all")) throw new HttpError(429, "the book store is busy, try again shortly", { retryAfterSeconds: 10 });
       const key = b.owner.toLowerCase();
-      if (!perOwner.hit(key)) throw new HttpError(429, "too many book requests for this owner", { retryAfterSeconds: Math.ceil(perOwner.retryAfterMs(key) / 1000) });
 
       const hash = keccak256(b.ciphertext);
       const ok = await verify({
@@ -102,19 +110,26 @@ export function createBookStore({ file, now = () => Date.now(), verify = verifyT
         signature: b.signature,
       }).catch(() => false);
       if (!ok) throw new HttpError(403, "signature does not come from the owner");
+      // Counted only after the signature checked out, so junk naming someone else's address cannot use up their budget.
+      if (!perOwner.hit(key)) throw new HttpError(429, "too many book requests for this owner", { retryAfterSeconds: Math.ceil(perOwner.retryAfterMs(key) / 1000) });
+      if (!(await canWrite(b.owner))) throw new HttpError(403, "this account has no city or deposit yet (the index can lag by a minute)");
 
       return mutex.run(async () => {
         const book = owners.get(key) ?? { nonce: "-1", entries: [] };
         if (b.nonce <= BigInt(book.nonce)) throw new HttpError(409, `nonce must be greater than ${book.nonce}`, { currentNonce: book.nonce });
         if (book.entries.some((e) => e.id === b.id)) throw new HttpError(409, "an entry with this id already exists; entries are never overwritten");
         if (book.entries.length >= MAX_ENTRIES_PER_OWNER) throw new HttpError(409, `this owner already has ${MAX_ENTRIES_PER_OWNER} entries`);
+        if (book.entries.reduce((sum, e) => sum + e.bytes, 0) + b.bytes > MAX_BYTES_PER_OWNER) throw new HttpError(409, `this owner's entries would exceed ${MAX_BYTES_PER_OWNER} bytes`);
+        if (totalBytes + b.bytes > MAX_TOTAL_BYTES) throw new HttpError(503, "book storage is full");
         if (!owners.has(key) && owners.size >= MAX_OWNERS) throw new HttpError(503, "book storage is full");
         const entry = { id: b.id, ciphertext: b.ciphertext, hash, bytes: b.bytes, createdAt: Math.floor(now() / 1000) };
         const next = { nonce: b.nonce.toString(), entries: [...book.entries, entry] };
         owners.set(key, next);
+        totalBytes += b.bytes;
         try {
           persist();
         } catch (e) {
+          totalBytes -= b.bytes;
           if (book.entries.length) owners.set(key, book);
           else owners.delete(key);
           console.error("book could not be saved:", e?.message || e);

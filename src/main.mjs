@@ -14,6 +14,8 @@ const port = Number(process.env.PORT || 8787);
 const server = createHttpServer(relayer, {
   allowedOrigins: parseAllowedOrigins(process.env.ALLOWED_ORIGIN),
   trustProxy: process.env.TRUST_PROXY === "1",
+  trustedHops: Number(process.env.TRUST_PROXY_HOPS || 1),
+  exposeIpDebug: process.env.EXPOSE_IP_DEBUG === "1",
 });
 server.listen(port, "0.0.0.0", () => console.log(`relayer listening on :${port} (factory ${relayer.config.factory})`));
 

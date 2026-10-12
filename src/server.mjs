@@ -26,9 +26,10 @@
 // STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off).
 
 import http from "node:http";
+import net from "node:net";
 import { createPublicClient, createWalletClient, defineChain, http as viemHttp } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { HttpError } from "./guards.mjs";
+import { HttpError, createMemo, createRateLimiter } from "./guards.mjs";
 import { createRelayer } from "./relayer.mjs";
 import { createStyleStore } from "./style.mjs";
 import { createBookStore } from "./book.mjs";
@@ -96,12 +97,14 @@ export function buildRelayerFromEnv(env = process.env) {
           config: { factory, startBlock: env.INDEX_START_BLOCK || DEFAULTS.factoryDeployBlock, range: env.INDEX_RANGE ? Number(env.INDEX_RANGE) : 100 },
         });
   const economy = env.ECONOMY === "0" ? null : createEconomy();
+  const bookFile = env.BOOK_FILE === undefined ? DEFAULTS.bookFile : env.BOOK_FILE;
+  // Only a mayor or a depositor of a real city may store sealed-book entries (a fresh key proves nothing); without the
+  // indexer there is no way to tell, so the store stays on but relies on its byte caps alone.
+  const book = bookFile ? createBookStore({ file: bookFile, canWrite: indexer ? (owner) => indexer.isParticipant(owner) : undefined }) : null;
   const humas =
     env.HUMAS_ADDRESS && indexer
-      ? createHumas({ publicClient, indexer, address: env.HUMAS_ADDRESS, llm, analystStore: analyst?.store ?? null, config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian } })
+      ? createHumas({ publicClient, indexer, address: env.HUMAS_ADDRESS, llm, analystStore: analyst?.store ?? null, bookStore: book, config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian } })
       : null;
-  const bookFile = env.BOOK_FILE === undefined ? DEFAULTS.bookFile : env.BOOK_FILE;
-  const book = bookFile ? createBookStore({ file: bookFile }) : null;
   return createRelayer({
     publicClient,
     walletClient,
@@ -120,6 +123,9 @@ export function buildRelayerFromEnv(env = process.env) {
 }
 
 async function readJson(req, limit = 4096) {
+  // A plain HTML form or a no-cors request cannot send this type without a CORS preflight, which closes a cheap way for
+  // another website to spend a visitor's per-IP allowance.
+  if (!String(req.headers["content-type"] || "").toLowerCase().startsWith("application/json")) throw new HttpError(415, "send the body as application/json");
   let size = 0;
   const chunks = [];
   for await (const chunk of req) {
@@ -140,16 +146,38 @@ export function parseAllowedOrigins(value) {
   return list;
 }
 
-/** The client address: the first X-Forwarded-For entry when behind a trusted proxy (Railway), else the socket's. */
-export function clientIp(req, trustProxy) {
-  if (trustProxy) {
-    const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-    if (forwarded) return forwarded;
-  }
-  return req.socket?.remoteAddress || undefined;
+/** IPv4-mapped IPv6 becomes IPv4; any other IPv6 address is reduced to its /64, because one customer controls a whole /64. */
+export function normalizeIp(ip) {
+  if (typeof ip !== "string" || !net.isIP(ip)) return undefined;
+  const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (mapped) return mapped[1];
+  if (net.isIPv4(ip)) return ip;
+  const [head, tail = ""] = ip.toLowerCase().split("::");
+  const front = head ? head.split(":") : [];
+  const back = tail ? tail.split(":") : [];
+  const full = ip.includes("::") ? [...front, ...Array(8 - front.length - back.length).fill("0"), ...back] : front;
+  return `${full.slice(0, 4).map((h) => (h || "0").replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
 
-export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:3000"], trustProxy = false } = {}) {
+/**
+ * The client address. Behind a proxy, X-Forwarded-For is a list the client can pre-fill, so only the entry added by
+ * the trusted proxy counts: the one `hops` places from the right (default 1). Anything that is not an IP address is
+ * ignored and the socket's address is used instead.
+ */
+export function clientIp(req, trustProxy, hops = 1) {
+  if (trustProxy) {
+    const parts = String(req.headers["x-forwarded-for"] || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const candidate = normalizeIp(parts[parts.length - hops]);
+    if (candidate) return candidate;
+  }
+  return normalizeIp(req.socket?.remoteAddress);
+}
+
+export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:3000"], trustProxy = false, trustedHops = 1, now = () => Date.now(), exposeIpDebug = false } = {}) {
+  // Every route shares a per-IP budget, and the public GETs that read the chain are cached for a few seconds, so
+  // polling cannot turn into an unbounded stream of RPC calls.
+  const everything = createRateLimiter({ windowMs: 60_000, max: 240, now });
+  const memo = createMemo({ now });
   return http.createServer(async (req, res) => {
     const origin = req.headers.origin;
     const allowOrigin = allowedOrigins.includes("*") ? "*" : origin && allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
@@ -166,17 +194,19 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
     };
     try {
       const path = new URL(req.url, "http://localhost").pathname;
-      const ctx = { ip: clientIp(req, trustProxy) };
+      const ctx = { ip: clientIp(req, trustProxy, trustedHops) };
       if (req.method === "OPTIONS") return send(204, {});
-      if (req.method === "GET" && (path === "/health" || path === "/")) return send(200, await relayer.health());
+      if (ctx.ip && !everything.hit(ctx.ip)) throw new HttpError(429, "too many requests from this address", { retryAfterSeconds: Math.ceil(everything.retryAfterMs(ctx.ip) / 1000) });
+      if (exposeIpDebug && req.method === "GET" && path === "/whoami") return send(200, { ip: ctx.ip ?? null, xForwardedFor: req.headers["x-forwarded-for"] ?? null, socket: req.socket?.remoteAddress ?? null });
+      if (req.method === "GET" && (path === "/health" || path === "/")) return send(200, await memo("health", 5_000, () => relayer.health()));
       if (req.method === "POST" && path === "/deposit") return send(200, await relayer.deposit(await readJson(req), ctx));
       if (req.method === "POST" && path === "/withdraw") return send(200, await relayer.withdraw(await readJson(req), ctx));
       if (req.method === "POST" && path === "/gas-drip") return send(200, await relayer.gasDrip(await readJson(req), ctx));
       if (req.method === "POST" && path === "/faucet") return send(200, await relayer.faucet(await readJson(req), ctx));
       if (relayer.style && req.method === "POST" && path === "/style") return send(200, await relayer.style.set(await readJson(req), ctx));
       if (relayer.style && req.method === "GET" && path.startsWith("/style/")) return send(200, relayer.style.get(decodeURIComponent(path.slice("/style/".length))));
-      if (relayer.indexer && req.method === "GET" && path === "/leaderboard") return send(200, await relayer.indexer.leaderboard());
-      if (relayer.indexer && req.method === "GET" && path === "/metrics") return send(200, await relayer.indexer.metrics());
+      if (relayer.indexer && req.method === "GET" && path === "/leaderboard") return send(200, await memo("leaderboard", 10_000, () => relayer.indexer.leaderboard()));
+      if (relayer.indexer && req.method === "GET" && path === "/metrics") return send(200, await memo("metrics", 10_000, () => relayer.indexer.metrics()));
       if (relayer.indexer && req.method === "GET" && path === "/index") return send(200, relayer.indexer.status());
       if (relayer.economy && req.method === "GET" && path === "/economy") return send(200, await relayer.economy.get());
       if (relayer.humas && req.method === "GET" && path.startsWith("/report/")) {
@@ -190,7 +220,7 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
         return send(200, id === undefined ? relayer.book.list(owner) : relayer.book.get(owner, id));
       }
       if (relayer.analyst && req.method === "GET" && path === "/analyst") return send(200, relayer.analyst.info());
-      if (relayer.analyst && req.method === "GET" && path.startsWith("/proposals/")) return send(200, await relayer.analyst.list(decodeURIComponent(path.slice("/proposals/".length))));
+      if (relayer.analyst && req.method === "GET" && path.startsWith("/proposals/")) return send(200, await (async () => { const city = decodeURIComponent(path.slice("/proposals/".length)); return memo(`proposals:${city.toLowerCase()}`, 5_000, () => relayer.analyst.list(city)); })());
       if (relayer.analyst && req.method === "POST" && path === "/analyst/run") return send(200, await relayer.analyst.run(await readJson(req), ctx));
       throw new HttpError(404, "not found");
     } catch (e) {
@@ -207,7 +237,7 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
 if (import.meta.url === `file://${process.argv[1]}`) {
   const relayer = buildRelayerFromEnv();
   const port = Number(process.env.PORT || 8787);
-  createHttpServer(relayer, { allowedOrigins: parseAllowedOrigins(process.env.ALLOWED_ORIGIN), trustProxy: process.env.TRUST_PROXY === "1" }).listen(port, "0.0.0.0", () => {
+  createHttpServer(relayer, { allowedOrigins: parseAllowedOrigins(process.env.ALLOWED_ORIGIN), trustProxy: process.env.TRUST_PROXY === "1", trustedHops: Number(process.env.TRUST_PROXY_HOPS || 1), exposeIpDebug: process.env.EXPOSE_IP_DEBUG === "1" }).listen(port, "0.0.0.0", () => {
     console.log(`relayer listening on :${port} (factory ${relayer.config.factory})`);
   });
 }

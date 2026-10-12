@@ -32,6 +32,7 @@ export const indexAbi = parseAbi([
 ]);
 const factoryAbi = parseAbi([
   "function platformTreasury() view returns (address)",
+  "function cityCount() view returns (uint256)",
   "function cityInfos(uint256 start, uint256 count) view returns ((address vault, address mayor, string name, string community, string mapURI, uint16 feeBps, uint64 createdAt, uint256 totalAssets, uint256 totalSupply, uint256 pricePerShare, address[] adapters)[])",
 ]);
 
@@ -95,15 +96,23 @@ export function createIndexer({ publicClient, logsClient = publicClient, config,
     return true;
   }
 
-  /** Applies one chunk's logs, oldest first. */
-  async function apply(logs) {
+  /** Block timestamps for every event that goes into a ledger. Fetched before anything is applied, so a failed lookup
+   * leaves the state untouched and the chunk can simply be retried. */
+  async function prefetchTimestamps(logs) {
+    const blocks = new Map();
+    for (const log of logs) if (log.eventName !== "Transfer" && log.eventName !== "CityCreated" && cityOf(log.address)) blocks.set(log.blockNumber.toString(), log.blockNumber);
+    await Promise.all([...blocks.values()].map((b) => timestampOf(b)));
+  }
+
+  /** Applies one chunk's logs, oldest first. Synchronous on purpose: nothing can fail halfway through. */
+  function apply(logs) {
     const ordered = [...logs].sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1));
     for (const log of ordered) {
       const a = log.args;
       if (log.eventName === "CityCreated") continue; // registered before the chunk is applied
       const city = cityOf(log.address);
       if (!city) continue;
-      const at = async () => ({ block: log.blockNumber.toString(), tx: log.transactionHash, ts: await timestampOf(log.blockNumber) });
+      const at = () => ({ block: log.blockNumber.toString(), tx: log.transactionHash, ts: blockTime.get(log.blockNumber.toString()) });
       switch (log.eventName) {
         case "Transfer": {
           const value = a.value;
@@ -116,24 +125,24 @@ export function createIndexer({ publicClient, logsClient = publicClient, config,
           city.deposits += 1;
           city.depositedAssets = (BigInt(city.depositedAssets) + a.assets).toString();
           if (!city.depositors.includes(lower(a.owner))) city.depositors.push(lower(a.owner));
-          addToLedger(city, { type: "deposit", ...(await at()), owner: getAddress(a.owner), assets: a.assets.toString(), shares: a.shares.toString() });
+          addToLedger(city, { type: "deposit", ...at(), owner: getAddress(a.owner), assets: a.assets.toString(), shares: a.shares.toString() });
           break;
         case "Withdraw":
           city.withdrawals += 1;
           city.withdrawnAssets = (BigInt(city.withdrawnAssets) + a.assets).toString();
-          addToLedger(city, { type: "withdraw", ...(await at()), owner: getAddress(a.owner), assets: a.assets.toString(), shares: a.shares.toString() });
+          addToLedger(city, { type: "withdraw", ...at(), owner: getAddress(a.owner), assets: a.assets.toString(), shares: a.shares.toString() });
           break;
         case "Rebalanced":
-          addToLedger(city, { type: "rebalance", ...(await at()), caller: getAddress(a.caller), from: getAddress(a.from), to: getAddress(a.to), amount: a.amount.toString(), planHash: a.planHash });
+          addToLedger(city, { type: "rebalance", ...at(), caller: getAddress(a.caller), from: getAddress(a.from), to: getAddress(a.to), amount: a.amount.toString(), planHash: a.planHash });
           break;
         case "Evacuated":
-          addToLedger(city, { type: "evacuate", ...(await at()), adapter: getAddress(a.adapter), amount: a.amount.toString() });
+          addToLedger(city, { type: "evacuate", ...at(), adapter: getAddress(a.adapter), amount: a.amount.toString() });
           break;
         case "FeeAccrued":
-          addToLedger(city, { type: "fee", ...(await at()), feeShares: a.feeShares.toString(), platformShares: a.platformShares.toString(), mayorShares: a.mayorShares.toString(), highWaterMark: a.newHighWaterMark.toString() });
+          addToLedger(city, { type: "fee", ...at(), feeShares: a.feeShares.toString(), platformShares: a.platformShares.toString(), mayorShares: a.mayorShares.toString(), highWaterMark: a.newHighWaterMark.toString() });
           break;
         case "PlanKeyRevealed":
-          addToLedger(city, { type: "reveal", ...(await at()), entryId: a.entryId });
+          addToLedger(city, { type: "reveal", ...at(), entryId: a.entryId });
           break;
         default:
           break;
@@ -145,15 +154,32 @@ export function createIndexer({ publicClient, logsClient = publicClient, config,
     return [c.factory, ...Object.values(state.cities).map((x) => x.vault)];
   }
 
+  /** Reads a range of logs; if the RPC refuses it (too many results, too slow), halves the range down to one block. */
   async function fetchChunk(fromBlock, toBlock) {
-    const logs = await logsClient.getLogs({ address: addresses(), fromBlock, toBlock });
-    return parseEventLogs({ abi: indexAbi, logs, strict: false });
+    try {
+      const logs = await logsClient.getLogs({ address: addresses(), fromBlock, toBlock });
+      return parseEventLogs({ abi: indexAbi, logs, strict: false });
+    } catch (e) {
+      if (fromBlock >= toBlock) throw e;
+      const mid = fromBlock + (toBlock - fromBlock) / 2n;
+      return [...(await fetchChunk(fromBlock, mid)), ...(await fetchChunk(mid + 1n, toBlock))];
+    }
+  }
+
+  /** Every city, in pages (the factory call is capped per request), up to a sane bound. */
+  async function allInfos() {
+    const count = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "cityCount" });
+    const infos = [];
+    for (let start = 0n; start < count && start < 500n; start += 50n) {
+      infos.push(...(await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "cityInfos", args: [start, 50n] })));
+    }
+    return infos;
   }
 
   async function takeSnapshots() {
     const t = Math.floor(now() / 1000);
     if (t - state.lastSnapshotAt < c.snapshotIntervalSeconds) return false;
-    const infos = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "cityInfos", args: [0n, 200n] });
+    const infos = await allInfos();
     for (const info of infos) {
       const key = lower(info.vault);
       const list = (state.snapshots[key] ??= []);
@@ -172,23 +198,27 @@ export function createIndexer({ publicClient, logsClient = publicClient, config,
       head = await publicClient.getBlockNumber();
       if (state.treasury === null) state.treasury = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "platformTreasury" });
       let requests = 0;
-      while (BigInt(state.nextBlock) <= head && requests < c.maxRequestsPerStep) {
-        const from = BigInt(state.nextBlock);
-        const to = from + c.range - 1n > head ? head : from + c.range - 1n;
-        let logs = await fetchChunk(from, to);
-        requests += 1;
-        const fresh = logs.filter((l) => l.eventName === "CityCreated" && !state.cities[lower(l.args.vault)]);
-        if (fresh.length) {
-          // New cities appeared in this chunk: their events were not in the address filter, so read the chunk again.
-          for (const log of fresh) registerCity(log);
-          logs = await fetchChunk(from, to);
+      try {
+        while (BigInt(state.nextBlock) <= head && requests < c.maxRequestsPerStep) {
+          const from = BigInt(state.nextBlock);
+          const to = from + c.range - 1n > head ? head : from + c.range - 1n;
+          let logs = await fetchChunk(from, to);
           requests += 1;
+          const fresh = logs.filter((l) => l.eventName === "CityCreated" && !state.cities[lower(l.args.vault)]);
+          if (fresh.length) {
+            // New cities appeared in this chunk: their events were not in the address filter, so read the chunk again.
+            for (const log of fresh) registerCity(log);
+            logs = await fetchChunk(from, to);
+            requests += 1;
+          }
+          await prefetchTimestamps(logs);
+          apply(logs);
+          state.nextBlock = (to + 1n).toString();
         }
-        await apply(logs);
-        state.nextBlock = (to + 1n).toString();
+        await takeSnapshots().catch((e) => console.error("snapshot failed:", e?.shortMessage || e?.message || e));
+      } finally {
+        persist(); // whatever progress was made is kept, also when a request failed halfway
       }
-      await takeSnapshots().catch((e) => console.error("snapshot failed:", e?.shortMessage || e?.message || e));
-      persist();
       return { nextBlock: state.nextBlock, head: head.toString(), behind: Number(head >= BigInt(state.nextBlock) ? head - BigInt(state.nextBlock) + 1n : 0n), requests };
     },
 
@@ -213,13 +243,19 @@ export function createIndexer({ publicClient, logsClient = publicClient, config,
     city(vault) {
       return cityOf(vault) ?? null;
     },
+
+    /** True if the address is the mayor of a city or has deposited into one: the people allowed to use the sealed-book store. */
+    isParticipant(address) {
+      const a = lower(address);
+      return Object.values(state.cities).some((city) => lower(city.mayor) === a || city.depositors.includes(a));
+    },
     cities: () => Object.values(state.cities),
     snapshotsOf: (vault) => state.snapshots[lower(vault)] ?? [],
     ledgerOf: (vault) => cityOf(vault)?.ledger ?? [],
 
     /** GET /leaderboard: live TVL and return, indexed resident counts, best return first. */
     async leaderboard() {
-      const infos = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "cityInfos", args: [0n, 200n] });
+      const infos = await allInfos();
       const rows = infos.map((info) => {
         // A city that is empty (or holds only a speck of dust) has a meaningless share price: with no shares left, one
         // leftover unit of yield reads as a 100% return. Only cities with residents' money are ranked.
@@ -245,7 +281,7 @@ export function createIndexer({ publicClient, logsClient = publicClient, config,
 
     /** GET /metrics: platform-wide numbers for the traction story (BT.4). */
     async metrics() {
-      const infos = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "cityInfos", args: [0n, 200n] });
+      const infos = await allInfos();
       const residents = new Set();
       let deposits = 0;
       let withdrawals = 0;

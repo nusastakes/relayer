@@ -50,9 +50,10 @@ function chain({ logs, head = 400, infos = [], timeOfBlock = (b) => NOW - (head 
       const wanted = new Set(address.map((a) => a.toLowerCase()));
       return logs.filter((l) => wanted.has(l.address.toLowerCase()) && l.blockNumber >= fromBlock && l.blockNumber <= toBlock);
     },
-    readContract: async ({ functionName }) => {
+    readContract: async ({ functionName, args }) => {
       if (functionName === "platformTreasury") return TREASURY;
-      if (functionName === "cityInfos") return infos;
+      if (functionName === "cityCount") return BigInt(infos.length);
+      if (functionName === "cityInfos") return infos.slice(Number(args[0]), Number(args[0] + args[1]));
       throw new Error(`unexpected read ${functionName}`);
     },
   };

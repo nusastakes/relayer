@@ -100,7 +100,6 @@ export function createStyleStore({ publicClient, factory, file, now = () => Date
       const b = parseStyleBody(rawBody);
       if (!global.hit("all")) throw new HttpError(429, "relayer is busy, try again shortly", { retryAfterSeconds: 10 });
       const key = b.vault.toLowerCase();
-      if (!perVault.hit(key)) throw new HttpError(429, "too many style requests for this city", { retryAfterSeconds: Math.ceil(perVault.retryAfterMs(key) / 1000) });
 
       const isCity = await publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "isCity", args: [b.vault] });
       if (!isCity) throw new HttpError(400, "vault was not created by the city factory");
@@ -114,6 +113,8 @@ export function createStyleStore({ publicClient, factory, file, now = () => Date
         signature: b.signature,
       }).catch(() => false);
       if (!ok) throw new HttpError(403, "signature does not come from the city's mayor");
+      // Counted only after the signature checked out, so junk aimed at a mayor's vault cannot use up the mayor's budget.
+      if (!perVault.hit(key)) throw new HttpError(429, "too many style requests for this city", { retryAfterSeconds: Math.ceil(perVault.retryAfterMs(key) / 1000) });
 
       return mutex.run(async () => {
         const stored = entries.get(key);

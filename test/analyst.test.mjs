@@ -206,7 +206,7 @@ function proposalLog(id) {
   return { address: GUARDIAN, topics, data, blockNumber: 1n, transactionHash: "0x" + "ab".repeat(32), transactionIndex: 0, blockHash: "0x" + "cd".repeat(32), logIndex: 0, removed: false };
 }
 
-function fakes({ granted = true, snapshot = snap(), proposals = [], estimateError = null, writeError = null, balance = 10n ** 19n, status = "success" } = {}) {
+function fakes({ granted = true, isCity = true, adapterCount = null, snapshot = snap(), proposals = [], estimateError = null, writeError = null, balance = 10n ** 19n, status = "success" } = {}) {
   const calls = { written: [], estimates: [] };
   const publicClient = {
     getBlock: async () => ({ baseFeePerGas: 100_000_000_000n }),
@@ -214,6 +214,8 @@ function fakes({ granted = true, snapshot = snap(), proposals = [], estimateErro
     getBalance: async () => balance,
     readContract: async ({ address, functionName, args }) => {
       switch (functionName) {
+        case "isCity":
+          return isCity;
         case "isActiveAgent":
           assert.equal(args[2], ANALIS_ROLE);
           return granted;
@@ -224,7 +226,7 @@ function fakes({ granted = true, snapshot = snap(), proposals = [], estimateErro
         case "totalAssets":
           return same(address, CITY) ? snapshot.total : snapshot.adapters.find((a) => same(a.address, address)).assets;
         case "adapters":
-          return snapshot.adapters.map((a) => a.address);
+          return adapterCount ? Array.from({ length: adapterCount }, (_, i) => ADDR(0xdead00 + i)) : snapshot.adapters.map((a) => a.address);
         case "maxShiftBps":
           return Number(snapshot.maxShiftBps);
         case "balanceOf":
@@ -286,6 +288,41 @@ test("scan: proposes the deploy with the rules' numbers and stores the reason be
   assert.equal(stored.proposalId, "5");
   assert.equal(verifyPlan(stored.plan, planHash), true, "the stored plan is the one the proposal committed to");
   assert.match(stored.plan.reason, /475\.00 AUSD/);
+});
+
+test("scan: a contract that is not one of the factory's cities is ignored before any other work (fake cities cannot make the bot spend)", async () => {
+  const { analyst, calls, publicClient } = botWith({ isCity: false });
+  const seen = [];
+  const original = publicClient.readContract;
+  publicClient.readContract = async (req) => {
+    seen.push(req.functionName);
+    return original(req);
+  };
+  assert.equal((await analyst.scanCity(CITY)).status, "not-a-city");
+  assert.deepEqual(seen, ["isCity"], "one read, nothing else");
+  assert.equal(calls.written.length, 0);
+  const viaHttp = await analyst.run({ city: CITY });
+  assert.equal(viaHttp.status, "not-a-city");
+});
+
+test("scan: a vault reporting more adapters than the factory allows is refused", async () => {
+  const { analyst, calls } = botWith({ adapterCount: 5000 });
+  assert.equal((await analyst.scanCity(CITY)).status, "not-a-city");
+  assert.equal(calls.written.length, 0);
+});
+
+test("scan: two scans of the same city at once file one proposal, not two", async () => {
+  const { analyst, calls } = botWith();
+  const [a, b] = await Promise.all([analyst.scanCity(CITY), analyst.scanCity(CITY)]);
+  assert.deepEqual([a.status, b.status].sort(), ["busy", "proposed"]);
+  assert.equal(calls.written.length, 1);
+});
+
+test("scan: stops proposing after the daily limit", async () => {
+  const { analyst, calls } = botWith({}, { config: { maxProposalsPerDay: 1, cooldownSeconds: 0 } });
+  assert.equal((await analyst.scanCity(CITY)).status, "proposed");
+  assert.equal((await analyst.scanCity(CITY)).status, "daily-limit");
+  assert.equal(calls.written.length, 1);
 });
 
 test("scan: a city whose mayor did not grant the role is left alone", async () => {

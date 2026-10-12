@@ -21,6 +21,9 @@ export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const BPS = 10_000n;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
+/** CityFactory.createCity accepts at most 8 adapters, so a vault reporting more is not one of ours. */
+const MAX_ADAPTERS = 8;
+
 export const DEFAULT_PARAMS = {
   /** Cash a city should keep idle for withdrawals, as a share of its assets. */
   idleBufferBps: 2000n,
@@ -46,6 +49,7 @@ const adapterAbi = parseAbi(["function totalAssets() view returns (uint256)", "f
 const tokenAbi = parseAbi(["function balanceOf(address) view returns (uint256)"]);
 const feedAbi = parseAbi(["function latest(bytes32 sourceId) view returns (uint32 apyBps, uint64 observedAt, uint64 updatedAt)"]);
 const factoryAbi = parseAbi([
+  "function isCity(address) view returns (bool)",
   "function cityCount() view returns (uint256)",
   "function cityAt(uint256 index) view returns (address)",
 ]);
@@ -257,6 +261,7 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
     cooldownSeconds: config.cooldownSeconds ?? 1800,
     proposalTtlSeconds: config.proposalTtlSeconds ?? 86_400,
     maxScanBack: config.maxScanBack ?? 200,
+    maxProposalsPerDay: config.maxProposalsPerDay ?? 100,
     gasMultiplierPercent: config.gasMultiplierPercent ?? 125n,
   };
   const account = walletClient.account;
@@ -265,6 +270,9 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
   const perIp = createRateLimiter({ windowMs: 60_000, max: 10, now });
   const global = createRateLimiter({ windowMs: 60_000, max: 30, now });
   const nowSeconds = () => Math.floor(now() / 1000);
+  /** Cities being scanned right now: a second scan of the same city (the loop and a /run call) must not file a duplicate. */
+  const inFlight = new Set();
+  const proposedAt = [];
 
   async function feeCaps() {
     const block = await publicClient.getBlock();
@@ -293,6 +301,7 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
       read(c.asset, tokenAbi, "balanceOf", [city]),
       read(c.feed, feedAbi, "latest", [c.sourceId]).catch(() => null),
     ]);
+    if (adapterList.length > MAX_ADAPTERS) return null;
     const adapters = await Promise.all(
       adapterList.map(async (address) => ({
         address,
@@ -315,6 +324,21 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
   /** Looks at one city and, if the rules say so and the mayor allowed it, files a proposal. */
   async function scanCity(rawCity) {
     const city = getAddress(rawCity);
+    const key = city.toLowerCase();
+    if (inFlight.has(key)) return { city, status: "busy" };
+    inFlight.add(key);
+    try {
+      return await scanOne(city);
+    } finally {
+      inFlight.delete(key);
+    }
+  }
+
+  async function scanOne(city) {
+    // Anyone can deploy a contract that answers mayor() and adapters(), and grantAgent only asks the contract who its
+    // mayor is, so a "city" must be checked against the factory before the bot spends reads, LLM calls or gas on it.
+    const known = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "isCity", args: [city] });
+    if (!known) return { city, status: "not-a-city" };
     const granted = await publicClient.readContract({ address: c.guardian, abi: guardianAbi, functionName: "isActiveAgent", args: [city, account.address, ANALIS_ROLE] });
     if (!granted) return { city, status: "not-granted" };
     if (nowSeconds() - store.lastForCity(city) < c.cooldownSeconds) return { city, status: "cooldown" };
@@ -322,8 +346,13 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
     if (pending) return { city, status: "pending", proposalId: pending.id.toString(), planHash: pending.planHash };
 
     const snapshot = await takeSnapshot(city);
+    if (snapshot === null) return { city, status: "not-a-city" };
     const decision = decide(snapshot, c.params);
     if (decision.action === "none") return { city, status: "nothing-to-do", why: decision.why };
+
+    const dayAgo = nowSeconds() - 86_400;
+    while (proposedAt.length && proposedAt[0] < dayAgo) proposedAt.shift();
+    if (proposedAt.length >= c.maxProposalsPerDay) return { city, status: "daily-limit" };
 
     const fallback = templateReason(decision, snapshot, c.params);
     const amountText = formatAssets(decision.amount);
@@ -371,6 +400,7 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
       const [created] = parseEventLogs({ abi: guardianAbi, eventName: "ProposalCreated", logs: receipt.logs });
       store.attach(planHash, { proposalId: created?.args.id ?? null, txHash: hash });
       store.markCity(city, nowSeconds());
+      proposedAt.push(nowSeconds());
       return { city, status: "proposed", proposalId: created ? created.args.id.toString() : null, planHash, txHash: hash, action: decision.action, amount: decision.amount.toString(), reason };
     } catch (e) {
       store.drop(planHash);
@@ -396,6 +426,7 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
     config: c,
     address: account.address,
     store,
+    balance: () => publicClient.getBalance({ address: account.address }),
     scanCity,
     scanAll,
 

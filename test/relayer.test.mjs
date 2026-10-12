@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encodeAbiParameters, encodeEventTopics, parseAbi } from "viem";
-import { HttpError, Mutex, createRateLimiter, parseDepositBody, parseFaucetBody, parseWithdrawBody } from "../src/guards.mjs";
+import { HttpError, Mutex, createMemo, createRateLimiter, parseDepositBody, parseFaucetBody, parseWithdrawBody } from "../src/guards.mjs";
 import { createRelayer, vaultAbi } from "../src/relayer.mjs";
 import { clientIp, parseAllowedOrigins } from "../src/server.mjs";
 
@@ -351,10 +351,52 @@ test("without a known IP (tests, local scripts) only the per-address and global 
   for (let i = 0; i < 6; i++) await relayer.faucet({ address: ADDR(300 + i) });
 });
 
-test("client IP: X-Forwarded-For only counts behind a trusted proxy", () => {
-  const req = { headers: { "x-forwarded-for": "198.51.100.1, 10.0.0.2" }, socket: { remoteAddress: "10.0.0.2" } };
-  assert.equal(clientIp(req, true), "198.51.100.1");
-  assert.equal(clientIp(req, false), "10.0.0.2", "a spoofable header is ignored when not behind a proxy");
+test("client IP: only the entry added by the trusted proxy counts, never what the client wrote", () => {
+  const spoofed = { headers: { "x-forwarded-for": "203.0.113.50, 198.51.100.1" }, socket: { remoteAddress: "10.0.0.2" } };
+  assert.equal(clientIp(spoofed, true), "198.51.100.1", "the rightmost entry is the one the proxy appended; the left is client-controlled");
+  assert.equal(clientIp(spoofed, true, 2), "203.0.113.50", "two trusted hops");
+  assert.equal(clientIp(spoofed, false), "10.0.0.2", "a spoofable header is ignored when not behind a proxy");
+  const junk = { headers: { "x-forwarded-for": "x".repeat(5000) }, socket: { remoteAddress: "10.0.0.2" } };
+  assert.equal(clientIp(junk, true), "10.0.0.2", "a header that is not an IP address falls back to the socket");
+  assert.equal(clientIp({ headers: { "x-forwarded-for": "2001:db8:1:2:aaaa:bbbb:cccc:dddd" }, socket: {} }, true), "2001:db8:1:2::/64");
+  assert.equal(clientIp({ headers: { "x-forwarded-for": "2001:db8:1:2:1111:2222:3333:4444" }, socket: {} }, true), "2001:db8:1:2::/64", "one /64 is one client");
+  assert.equal(clientIp({ headers: {}, socket: { remoteAddress: "::ffff:192.0.2.7" } }, false), "192.0.2.7");
+});
+
+test("rate limiter: refuses new keys once full of live ones instead of growing without bound", () => {
+  let t = 0;
+  const rl = createRateLimiter({ windowMs: 60_000, max: 5, now: () => t, maxKeys: 3 });
+  assert.equal(rl.hit("a") && rl.hit("b") && rl.hit("c"), true);
+  assert.equal(rl.hit("d"), false, "full of live keys");
+  assert.equal(rl.size(), 3);
+  assert.equal(rl.hit("a"), true, "existing keys still work");
+  t = 61_000;
+  assert.equal(rl.hit("d"), true, "expired keys are swept to make room");
+});
+
+test("mutex: depth counts running and waiting tasks", async () => {
+  const m = new Mutex();
+  assert.equal(m.depth, 0);
+  const first = m.run(() => new Promise((r) => setTimeout(r, 20)));
+  const second = m.run(async () => {});
+  assert.equal(m.depth, 2);
+  await Promise.all([first, second]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(m.depth, 0);
+});
+
+test("memo: shares one in-flight call, caches for the ttl, and does not cache errors", async () => {
+  let t = 0;
+  let calls = 0;
+  const memo = createMemo({ now: () => t });
+  const slow = () => new Promise((r) => setTimeout(() => r(++calls), 10));
+  const [a, b] = await Promise.all([memo("k", 1000, slow), memo("k", 1000, slow)]);
+  assert.deepEqual([a, b, calls], [1, 1, 1]);
+  assert.equal(await memo("k", 1000, slow), 1, "still cached");
+  t = 1001;
+  assert.equal(await memo("k", 1000, slow), 2);
+  await assert.rejects(memo("bad", 1000, async () => { throw new Error("boom"); }), /boom/);
+  assert.equal(await memo("bad", 1000, async () => "ok"), "ok", "an error is not cached");
 });
 
 test("allowed origins parse a comma-separated list and default to the local dev server", () => {

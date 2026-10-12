@@ -37,11 +37,18 @@ export function groupBySector(overview) {
 
 export function createEconomy({ fetchImpl = fetch, now = () => Date.now(), ttlMs = 10 * 60_000, url = DEFILLAMA_URL, timeoutMs = 15_000 } = {}) {
   let cache = null;
+  let inFlight = null;
   return {
     enabled: true,
-    /** GET /economy */
+    /** GET /economy: one fetch at a time, however many clients ask while the cache is empty or expired. */
     async get() {
       if (cache && now() - cache.at < ttlMs) return cache.value;
+      inFlight ??= this.refresh().finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
+    },
+    async refresh() {
       try {
         const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
         if (!res.ok) throw new Error(`DefiLlama answered ${res.status}`);
@@ -63,7 +70,8 @@ export function createEconomy({ fetchImpl = fetch, now = () => Date.now(), ttlMs
         return value;
       } catch (e) {
         if (cache) return { ...cache.value, stale: true };
-        throw new HttpError(502, `economic data is unavailable: ${e?.message || e}`);
+        console.error("economy: DefiLlama fetch failed:", e?.message || e);
+        throw new HttpError(502, "economic data is unavailable right now");
       }
     },
   };

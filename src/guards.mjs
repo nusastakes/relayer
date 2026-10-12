@@ -65,15 +65,27 @@ export function parseFaucetBody(body) {
 }
 
 /** Fixed-window counter per key. `hit(key)` returns true if the call is allowed. */
-export function createRateLimiter({ windowMs, max, now = () => Date.now() }) {
+export function createRateLimiter({ windowMs, max, now = () => Date.now(), maxKeys = 50_000 }) {
   const buckets = new Map();
+  let lastSweep = 0;
+  /** Drops expired buckets, at most once a second so a flood of new keys cannot make every call O(n). */
+  const sweep = (t) => {
+    if (t - lastSweep < 1000) return;
+    lastSweep = t;
+    for (const [k, v] of buckets) if (t - v.start >= windowMs) buckets.delete(k);
+  };
   return {
+    size: () => buckets.size,
     hit(key) {
       const t = now();
       const b = buckets.get(key);
       if (!b || t - b.start >= windowMs) {
+        if (!b && buckets.size >= maxKeys) {
+          sweep(t);
+          // Still full of live keys: refuse new ones instead of growing without bound (an attacker rotating keys).
+          if (buckets.size >= maxKeys) return false;
+        }
         buckets.set(key, { start: t, count: 1 });
-        if (buckets.size > 10_000) for (const [k, v] of buckets) if (t - v.start >= windowMs) buckets.delete(k);
         return true;
       }
       if (b.count >= max) return false;
@@ -95,12 +107,49 @@ export function createRateLimiter({ windowMs, max, now = () => Date.now() }) {
 /** Runs async functions one at a time, so one sending account never reuses a nonce. */
 export class Mutex {
   #tail = Promise.resolve();
+  #depth = 0;
+  /** How many tasks are running or waiting. */
+  get depth() {
+    return this.#depth;
+  }
   run(fn) {
+    this.#depth += 1;
     const result = this.#tail.then(fn, fn);
+    result.then(
+      () => (this.#depth -= 1),
+      () => (this.#depth -= 1),
+    );
     this.#tail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
   }
+}
+
+/**
+ * Memoises an async call for `ttlMs` and shares one in-flight call between concurrent callers, so a public GET that
+ * fans out to the RPC costs at most one round of reads per window however many clients ask. Errors are not cached.
+ */
+export function createMemo({ now = () => Date.now(), maxKeys = 500 } = {}) {
+  const entries = new Map();
+  return function memo(key, ttlMs, fn) {
+    const hit = entries.get(key);
+    if (hit && (hit.pending || now() - hit.at < ttlMs)) return hit.pending ?? Promise.resolve(hit.value);
+    if (entries.size >= maxKeys) entries.clear();
+    const pending = Promise.resolve()
+      .then(fn)
+      .then(
+        (value) => {
+          entries.set(key, { at: now(), value, pending: null });
+          return value;
+        },
+        (error) => {
+          entries.delete(key);
+          throw error;
+        },
+      );
+    entries.set(key, { at: now(), value: undefined, pending });
+    return pending;
+  };
 }

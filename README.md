@@ -41,7 +41,7 @@ relayer tidak cukup. Pembatas laju per IP: setor dan tarik 30 per menit, faucet 
 
 ```
 npm install
-npm test                         # 113 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
+npm test                         # 138 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
 RELAYER_PRIVATE_KEY=0x… npm start   # server di :8787; HTTP, dan keeper bila RUN_KEEPER=1 (src/main.mjs)
 ```
 
@@ -49,7 +49,7 @@ Variabel: `RELAYER_PRIVATE_KEY` (wajib, hanya dari environment), `MONAD_TESTNET_
 (kosongkan untuk mematikan `/faucet`), `PORT`, `ALLOWED_ORIGIN` (CORS, beberapa origin dipisah koma, bawaan
 `http://localhost:3000`), `MAX_DEPOSIT_ASSETS`, `TRUST_PROXY=1` (baca IP klien dari `X-Forwarded-For` di belakang
 proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INTERVAL_SEC` (bawaan 3600), `ANALYST_PRIVATE_KEY` (menyalakan bot Analis), `RUN_ANALYST=1` dan `ANALYST_INTERVAL_SEC` (bawaan 600) untuk memindai semua kota
-tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `BOOK_FILE` (bawaan `./data/book.json`, kosongkan untuk mematikan `/book`), `RUN_INDEXER=1` (menjalankan pencatat), `INDEX_FILE` (bawaan `./data/index.json`), `INDEX_RANGE` (blok per permintaan `getLogs`, bawaan 100), `INDEX_START_BLOCK` (bawaan blok deploy factory v2, 70461935), `INDEXER=0` / `ECONOMY=0` untuk mematikan, `HUMAS_ADDRESS` (menyalakan Humas), `ANTHROPIC_API_KEY` dan/atau `XKIRO_API_KEY` (opsional; Sonnet menulis alasan usulan, Anthropic dicoba lebih dulu lalu gateway xKiro
+tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `BOOK_FILE` (bawaan `./data/book.json`, kosongkan untuk mematikan `/book`), `TRUST_PROXY_HOPS` (jumlah proxy tepercaya di depan relayer; **di Railway 2**, lihat bagian keamanan), `RUN_INDEXER=1` (menjalankan pencatat), `INDEX_FILE` (bawaan `./data/index.json`), `INDEX_RANGE` (blok per permintaan `getLogs`, bawaan 100), `INDEX_START_BLOCK` (bawaan blok deploy factory v2, 70461935), `INDEXER=0` / `ECONOMY=0` untuk mematikan, `HUMAS_ADDRESS` (menyalakan Humas), `ANTHROPIC_API_KEY` dan/atau `XKIRO_API_KEY` (opsional; Sonnet menulis alasan usulan, Anthropic dicoba lebih dulu lalu gateway xKiro
 dengan model `anthropic/claude-sonnet-5` atau `XKIRO_MODEL`; `ANALYST_LLM=0` mengabaikannya), `STYLE_FILE` (berkas JSON
 tempat gaya kota disimpan, bawaan `./data/styles.json`; isi dengan jalur di volume agar bertahan lintas deploy, kosongkan untuk
 mematikan `/style`).
@@ -108,6 +108,19 @@ Humas adalah anggota staf ketiga: hanya membaca dan menulis laporan, tanpa kunci
 ## Buku strategi tersegel (`src/book.mjs`) dan daftar staf (`src/agents.mjs`)
 
 PRD (arsitektur dan R10, bounty B17) menyebut "penyimpanan tak tepercaya" untuk ciphertext buku strategi. Browser mengenkripsi tiap entri dengan kunci turunan passkey (HKDF per entri), jadi relayer hanya memegang ciphertext yang tidak bisa ia baca. Perangkat kedua dengan passkey yang sama menurunkan kunci yang sama, mengambil ciphertext dari sini, dan mendekripsinya (cross-device test). Hash `keccak256(ciphertext)` dicatat on-chain sebagai `planHash` pada `rebalance`; di akhir musim walikota membuka kunci entri pilihan dan siapa pun bisa mengambil ciphertext publik, mendekripsi, dan mencocokkan hash. Entri tidak bisa ditimpa atau dihapus lewat API, supaya keputusan tidak bisa diganti diam-diam setelah hasilnya terlihat. Operator relayer tetap bisa menghapus berkasnya; yang membuktikan isi dan waktunya adalah hash on-chain. Skrip uji: `RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/book-check.mjs`.
+
+## Keamanan dan batas pemakaian
+
+Relayer ini publik dan tanpa autentikasi, jadi ditinjau oleh agen independen (13 Okt 2026, laporan dan perbaikan di [DECISIONS](../docs/DECISIONS.md) dan vault TC49.14). Hal yang berlaku sekarang:
+- **IP klien.** Di belakang proxy, hanya entri `X-Forwarded-For` yang ditambahkan proxy tepercaya yang dipakai (`TRUST_PROXY_HOPS` dari kanan); nilai yang bukan alamat IP diabaikan, IPv6 dikelompokkan per /64. **Diukur di Railway:** edge Railway menimpa header kiriman klien dan menulis `IP-klien, IP-edge`, jadi `TRUST_PROXY_HOPS=2` memberi IP klien asli (header palsu dibuang), sedangkan 1 akan menyamakan semua pengguna ke IP edge.
+- **Pembatas laju** tumbuh paling banyak 50 ribu kunci (kunci baru ditolak bila penuh), semua rute berbagi 240 permintaan per menit per IP, dan GET publik yang membaca rantai (`/health`, `/leaderboard`, `/metrics`, `/proposals`) di-cache 5 sampai 10 detik dengan satu panggilan bersama.
+- **Pengeluaran.** Gas drip berhenti bila relayer akan turun di bawah cadangan 2 MON dan dibatasi 40 per hari; gas yang dikomitmenkan untuk transaksi bersponsor dibatasi 5 MON per 24 jam dan antrean maksimal 10; faucet menghitung setiap percobaan (60 per jam per IP), termasuk yang ditolak cooldown. `GET /health` memuat `lowFunds`, `analystBalanceWei`, `queueDepth`, dan `gasSpentLast24hWei`.
+- **Badan permintaan** harus `application/json` (415 bila bukan), supaya situs lain tidak bisa memakai jatah IP pengunjung lewat form.
+- **Buku strategi** hanya bisa ditulis oleh walikota atau penyetor kota asli (cek lewat pencatat), tanda tangan diverifikasi sebelum jatah pemilik dipakai, dan ada batas byte (1 MB per pemilik, 20 MB total). Gaya kota juga memverifikasi tanda tangan sebelum jatah kota dipakai.
+- **Analis** hanya bekerja untuk kota buatan factory (`isCity`), menolak vault dengan lebih dari 8 adapter, memindai satu kota satu kali pada satu waktu, dan paling banyak 100 usulan per hari.
+- **Pencatat** menyiapkan semua timestamp sebelum mengubah state (kegagalan RPC tidak menggandakan hitungan), membagi dua rentang `getLogs` bila RPC menolak, dan membaca daftar kota per halaman.
+
+Batas yang diketahui dan belum diperbaiki: keeper APY mengirim transaksi dari kunci yang sama tanpa antrean relayer (benturan nonce langka); pencatat membaca blok terbaru tanpa kedalaman konfirmasi atau rollback (risiko rendah di testnet); papan peringkat bisa dimainkan dengan donasi langsung ke vault dan jumlah penduduk bisa dipalsukan dengan banyak akun (sybil); nama dan komunitas kota adalah teks bebas dari penyerang, jadi **frontend harus meng-escape-nya** dan teks itu juga masuk ke prompt Humas (hanya memengaruhi laporan kota itu sendiri); dompet relayer dan Analis harus diisi ulang manual (`lowFunds` di `/health` memberi tanda).
 
 ## Keeper APY (`src/keeper.mjs`)
 
