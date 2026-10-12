@@ -394,3 +394,16 @@ test("failed requests still count against the client IP, so invalid-request spam
   for (let i = 0; i < 30; i++) await assert.rejects(relayer.deposit(goodBody({ owner: ADDR(1000 + i) }), ctx), (e) => e.status === 400);
   await assert.rejects(relayer.deposit(goodBody({ owner: ADDR(5000) }), ctx), (e) => e.status === 429 && /this address/.test(e.message));
 });
+
+test("health: tells the UI which optional features are on", async () => {
+  const on = await relayerWith().relayer.health();
+  assert.equal(on.faucetEnabled, true);
+  assert.equal(on.gasDripEnabled, true);
+  assert.equal(on.styleEnabled, false);
+  const off = await relayerWith({}, { faucet: null, gasDripWei: 0n }).relayer.health();
+  assert.equal(off.faucetEnabled, false);
+  assert.equal(off.gasDripEnabled, false);
+  const f = fakes();
+  const withStyle = await createRelayer({ ...f, style: { enabled: true }, config: { factory: FACTORY, faucet: FAUCET } }).health();
+  assert.equal(withStyle.styleEnabled, true);
+});

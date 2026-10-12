@@ -8,20 +8,25 @@
 //   POST /withdraw  { vault, owner, shares, deadline, v, r, s }   -> { hash, status, assets, receiver }
 //   POST /gas-drip  { address }                                   -> { hash, recipient, amountWei }   (testnet MON for mayors)
 //   POST /faucet    { address }                                   -> { hash, status, recipient }   (testnet AUSD)
+//   POST /style     { vault, code, nonce, signature }             -> { vault, code, nonce }   (mayor-signed EIP-712 CityStyle, see src/style.mjs)
+//   GET  /style/:vault                                            -> { code, nonce }
 //
 // Environment: RELAYER_PRIVATE_KEY (required), MONAD_TESTNET_RPC, FACTORY_ADDRESS, AUSD_FAUCET (set to "" to disable
-// /faucet), PORT (default 8787), ALLOWED_ORIGIN (CORS, comma-separated, default http://localhost:3000), TRUST_PROXY=1 behind a proxy such as Railway, MAX_DEPOSIT_ASSETS.
+// /faucet), PORT (default 8787), ALLOWED_ORIGIN (CORS, comma-separated, default http://localhost:3000), TRUST_PROXY=1 behind a proxy such as Railway, MAX_DEPOSIT_ASSETS,
+// STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off).
 
 import http from "node:http";
 import { createPublicClient, createWalletClient, defineChain, http as viemHttp } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { HttpError } from "./guards.mjs";
 import { createRelayer } from "./relayer.mjs";
+import { createStyleStore } from "./style.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
   factory: "0x6765F0C80F6a7D5EC7Af120d12e81628F641508E", // CityFactory, contracts/deployments/monad-testnet.json
   faucet: "0xd236c18D274E54FAccC3dd9DDA4b27965a73ee6C", // Agora AUSD testnet faucet
+  styleFile: "./data/styles.json",
 };
 
 export function buildRelayerFromEnv(env = process.env) {
@@ -32,11 +37,15 @@ export function buildRelayerFromEnv(env = process.env) {
   const account = privateKeyToAccount(key);
   const publicClient = createPublicClient({ chain, transport: viemHttp(rpc) });
   const walletClient = createWalletClient({ account, chain, transport: viemHttp(rpc) });
+  const factory = env.FACTORY_ADDRESS || DEFAULTS.factory;
+  const styleFile = env.STYLE_FILE === undefined ? DEFAULTS.styleFile : env.STYLE_FILE;
+  const style = styleFile ? createStyleStore({ publicClient, factory, file: styleFile }) : null;
   return createRelayer({
     publicClient,
     walletClient,
+    style,
     config: {
-      factory: env.FACTORY_ADDRESS || DEFAULTS.factory,
+      factory,
       faucet: env.AUSD_FAUCET === undefined ? DEFAULTS.faucet : env.AUSD_FAUCET || null,
       maxAssets: env.MAX_DEPOSIT_ASSETS ? BigInt(env.MAX_DEPOSIT_ASSETS) : undefined,
     },
@@ -97,6 +106,8 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (req.method === "POST" && path === "/withdraw") return send(200, await relayer.withdraw(await readJson(req), ctx));
       if (req.method === "POST" && path === "/gas-drip") return send(200, await relayer.gasDrip(await readJson(req), ctx));
       if (req.method === "POST" && path === "/faucet") return send(200, await relayer.faucet(await readJson(req), ctx));
+      if (relayer.style && req.method === "POST" && path === "/style") return send(200, await relayer.style.set(await readJson(req), ctx));
+      if (relayer.style && req.method === "GET" && path.startsWith("/style/")) return send(200, relayer.style.get(decodeURIComponent(path.slice("/style/".length))));
       throw new HttpError(404, "not found");
     } catch (e) {
       if (e instanceof HttpError) {

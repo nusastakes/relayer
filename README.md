@@ -13,11 +13,13 @@ tangan permit), siapa pun pengirimnya.
 
 | Endpoint | Isi | Hasil |
 | --- | --- | --- |
-| `GET /health` | | alamat relayer, saldo MON, blok terakhir |
+| `GET /health` | | alamat relayer, saldo MON, blok terakhir, dan `faucetEnabled`, `gasDripEnabled`, `styleEnabled` (supaya UI menyembunyikan tombol yang tidak aktif) |
 | `POST /deposit` | `{ vault, owner, assets, deadline, v, r, s }` | `{ hash, status, shares, sharesOwner }` |
 | `POST /withdraw` | `{ vault, owner, shares, deadline, v, r, s }` (permit atas **share** kota) | `{ hash, status, assets, receiver }`; aset selalu dibayar ke `owner` |
 | `POST /faucet` | `{ address }` (hanya testnet) | `{ hash, status, recipient }`; `429` dengan `retryAfterSeconds` bila faucet baru dipakai |
 | `POST /gas-drip` | `{ address }` (hanya testnet) | `{ hash, recipient, amountWei }`: 1 MON untuk walikota atau kunci sesinya (cukup untuk `createCity`, yang butuh saldo sekitar 0,63 MON), sekali per alamat per hari, hanya bila saldo < 0,7 MON |
+| `POST /style` | `{ vault, code, nonce, signature }`; `signature` = EIP-712 `CityStyle(address vault, string code, uint256 nonce)` dari akun **walikota**, domain `{ name: "Nusastakes", version: "1", chainId: 10143 }` (tanpa `verifyingContract`) | `{ vault, code, nonce }`. `code` kosong atau `<tema>.<topeng base36>` (huruf kecil, angka, `-`, `_`; maksimal 32 karakter), `nonce` harus lebih besar dari yang tersimpan (nonce pertama boleh 0). `403` bila penanda tangan bukan `vault.mayor()`, `409` bila nonce basi |
+| `GET /style/:vault` | | `{ code, nonce }` (`code: ""` bila belum ada) |
 
 Perlindungan: vault harus dibuat oleh `CityFactory` (`isCity`), deadline permit minimal 20 detik ke depan, batas jumlah
 (`MAX_DEPOSIT_ASSETS`, bawaan 10.000 AUSD), batas laju per pemilik (3 per menit) dan global (30 per menit), transaksi
@@ -29,14 +31,16 @@ relayer tidak cukup. Pembatas laju per IP: setor dan tarik 30 per menit, faucet 
 
 ```
 npm install
-npm test                         # 55 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu)
+npm test                         # 65 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota)
 RELAYER_PRIVATE_KEY=0x… npm start   # server di :8787; HTTP, dan keeper bila RUN_KEEPER=1 (src/main.mjs)
 ```
 
 Variabel: `RELAYER_PRIVATE_KEY` (wajib, hanya dari environment), `MONAD_TESTNET_RPC`, `FACTORY_ADDRESS`, `AUSD_FAUCET`
 (kosongkan untuk mematikan `/faucet`), `PORT`, `ALLOWED_ORIGIN` (CORS, beberapa origin dipisah koma, bawaan
 `http://localhost:3000`), `MAX_DEPOSIT_ASSETS`, `TRUST_PROXY=1` (baca IP klien dari `X-Forwarded-For` di belakang
-proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INTERVAL_SEC` (bawaan 3600).
+proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INTERVAL_SEC` (bawaan 3600), `STYLE_FILE` (berkas JSON
+tempat gaya kota disimpan, bawaan `./data/styles.json`; isi dengan jalur di volume agar bertahan lintas deploy, kosongkan untuk
+mematikan `/style`).
 
 ### Hosting di Railway
 
@@ -94,6 +98,10 @@ Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`,
 
 - Akun Mera adalah EOA biasa menurut dokumentasi resmi dan `toViemAccount` mendukung `signTypedData`, tetapi permit
   belum ditandatangani dengan Mera sungguhan.
+- Gaya kota (`/style`) hanya tampilan dan tidak memengaruhi dana. Isinya disimpan di berkas JSON milik server: tidak bisa
+  diperiksa orang luar seperti event onchain, dan hilang bila deploy ulang tanpa volume. Tanda tangan walikota memastikan
+  hanya walikota yang mengubah, tetapi operator relayer tetap bisa mengubah berkasnya. Tempat yang benar untuk jangka
+  panjang adalah `CityVault.setStyle(bytes32)` di kontrak v3.
 - Relayer belum diuji di bawah beban atau serangan sungguhan; pembatas laju hanya di memori satu proses.
 - `/faucet` bergantung pada faucet publik Agora yang membatasi frekuensi sekitar satu tetes per 60 detik secara
   bersama; saat sibuk relayer mengembalikan `429`.
