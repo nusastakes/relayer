@@ -188,15 +188,35 @@ const REASON_SYSTEM = [
   "Do not promise returns. Reply with the sentences only.",
 ].join(" ");
 
-/** Asks Anthropic for the reason text. Returns null on any failure so the caller falls back to the template. */
-export async function askForReason({ apiKey, model = "claude-sonnet-5-5", fetchImpl = fetch, timeoutMs = 15_000 }, facts) {
-  if (!apiKey) return null;
+/** Where each provider is reached. Both speak the Anthropic Messages format. */
+const PROVIDERS = {
+  anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-5-5" },
+  // xKiro is a gateway compatible with the Anthropic and OpenAI formats; its model ids carry a vendor prefix and its
+  // list (GET /v1/models) has no claude-sonnet-5-5 as of 13 Oct 2026, so anthropic/claude-sonnet-5 is the nearest.
+  xkiro: { baseUrl: "https://api.xkiro.com/v1", model: "anthropic/claude-sonnet-5" },
+};
+
+/**
+ * Asks one provider for the reason text. Returns null on any failure so the caller can try the next one or fall back to
+ * the template.
+ */
+export async function askForReason({ provider = "anthropic", apiKey, model, baseUrl, fetchImpl = fetch, timeoutMs = 15_000 }, facts) {
+  const known = PROVIDERS[provider];
+  if (!apiKey || !known) return null;
+  const headers = { "content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": apiKey };
+  if (provider === "xkiro") headers.authorization = `Bearer ${apiKey}`; // xKiro documents both; send both
   try {
-    const res = await fetchImpl("https://api.anthropic.com/v1/messages", {
+    const res = await fetchImpl(`${(baseUrl ?? known.baseUrl).replace(/\/$/, "")}/messages`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      // Sonnet 5.5 thinks by default and the thinking would eat the token budget; the answer is two sentences.
-      body: JSON.stringify({ model, max_tokens: 600, thinking: { type: "between_tools" }, system: REASON_SYSTEM, messages: [{ role: "user", content: JSON.stringify(facts) }] }),
+      headers,
+      // Sonnet 5.5 on Anthropic thinks by default and the thinking would eat the token budget; the answer is two sentences.
+      body: JSON.stringify({
+        model: model ?? known.model,
+        max_tokens: 600,
+        ...(provider === "anthropic" ? { thinking: { type: "between_tools" } } : {}),
+        system: REASON_SYSTEM,
+        messages: [{ role: "user", content: JSON.stringify(facts) }],
+      }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return null;
@@ -208,11 +228,22 @@ export async function askForReason({ apiKey, model = "claude-sonnet-5-5", fetchI
   }
 }
 
+/** Tries the providers in order and returns the first usable text. */
+export async function askForReasonAny(providers, facts) {
+  for (const p of providers) {
+    const text = await askForReason(p, facts);
+    if (text) return text;
+  }
+  return null;
+}
+
 // ------------------------------------------------------------------------------------------------ the bot
 
 const shortReason = (e) => (e?.shortMessage || e?.message || String(e)).split("\n")[0].slice(0, 200);
 
 export function createAnalyst({ publicClient, walletClient, config, store, llm = null, now = () => Date.now() }) {
+  /** One provider config or a list of them, tried in order. */
+  const providers = (Array.isArray(llm) ? llm : llm ? [llm] : []).filter((p) => p?.apiKey);
   const c = {
     guardian: config.guardian,
     factory: config.factory,
@@ -294,8 +325,8 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
     const fallback = templateReason(decision, snapshot, c.params);
     const amountText = formatAssets(decision.amount);
     let reason = fallback;
-    if (llm) {
-      const text = await askForReason(llm, {
+    if (providers.length) {
+      const text = await askForReasonAny(providers, {
         action: decision.action,
         amountText,
         idleText: formatAssets(snapshot.idle),
@@ -393,7 +424,7 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
 
     /** GET /analyst */
     info() {
-      return { enabled: true, address: account.address, role: ANALIS_ROLE, roleName: "ANALIS", guardian: c.guardian, llm: Boolean(llm), cooldownSeconds: c.cooldownSeconds };
+      return { enabled: true, address: account.address, role: ANALIS_ROLE, roleName: "ANALIS", guardian: c.guardian, llm: providers.length > 0, llmProviders: providers.map((p) => p.provider ?? "anthropic"), cooldownSeconds: c.cooldownSeconds };
     },
   };
 }

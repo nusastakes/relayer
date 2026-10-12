@@ -34,7 +34,7 @@ relayer tidak cukup. Pembatas laju per IP: setor dan tarik 30 per menit, faucet 
 
 ```
 npm install
-npm test                         # 86 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
+npm test                         # 88 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
 RELAYER_PRIVATE_KEY=0x… npm start   # server di :8787; HTTP, dan keeper bila RUN_KEEPER=1 (src/main.mjs)
 ```
 
@@ -42,8 +42,8 @@ Variabel: `RELAYER_PRIVATE_KEY` (wajib, hanya dari environment), `MONAD_TESTNET_
 (kosongkan untuk mematikan `/faucet`), `PORT`, `ALLOWED_ORIGIN` (CORS, beberapa origin dipisah koma, bawaan
 `http://localhost:3000`), `MAX_DEPOSIT_ASSETS`, `TRUST_PROXY=1` (baca IP klien dari `X-Forwarded-For` di belakang
 proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INTERVAL_SEC` (bawaan 3600), `ANALYST_PRIVATE_KEY` (menyalakan bot Analis), `RUN_ANALYST=1` dan `ANALYST_INTERVAL_SEC` (bawaan 600) untuk memindai semua kota
-tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `ANTHROPIC_API_KEY` (opsional; Sonnet 5.5 menulis alasan usulan, `ANALYST_LLM=0`
-mengabaikannya), `STYLE_FILE` (berkas JSON
+tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `ANTHROPIC_API_KEY` dan/atau `XKIRO_API_KEY` (opsional; Sonnet menulis alasan usulan, Anthropic dicoba lebih dulu lalu gateway xKiro
+dengan model `anthropic/claude-sonnet-5` atau `XKIRO_MODEL`; `ANALYST_LLM=0` mengabaikannya), `STYLE_FILE` (berkas JSON
 tempat gaya kota disimpan, bawaan `./data/styles.json`; isi dengan jalur di volume agar bertahan lintas deploy, kosongkan untuk
 mematikan `/style`).
 
@@ -90,7 +90,7 @@ Aturan (`decide`, deterministik; angka tidak pernah datang dari LLM):
 - Data yield hilang atau basi, kota kosong, atau tidak ada adapter dengan yield yang dikenal: tidak ada usulan.
 - Tidak mengusulkan lagi selama usulannya sendiri masih menunggu (belum disetujui dan belum lewat 1 hari), dan menunggu 30 menit setelah tiap usulan.
 
-Alasan usulan ditulis dalam bahasa Indonesia dari fakta. Bila `ANTHROPIC_API_KEY` diisi, Sonnet 5.5 menulisnya; teks LLM dibuang bila tidak menyebut jumlah yang diusulkan. Alasan dan angkanya disimpan di relayer; `planHash` di rantai = `keccak256` dari JSON rencana (urutan kunci tetap), jadi alasan yang dibaca walikota dapat diperiksa terhadap usulan di rantai. Uji ujung ke ujung di testnet: `CITY=0x… node scripts/analyst-e2e.mjs`.
+Alasan usulan ditulis dalam bahasa Indonesia dari fakta. Bila `ANTHROPIC_API_KEY` atau `XKIRO_API_KEY` diisi, Sonnet menulisnya (Anthropic dulu, xKiro bila gagal); teks LLM dibuang bila tidak menyebut jumlah yang diusulkan, dan alasan kembali ke template bila semua provider gagal. Jumlah dalam teks dipotong ke dua desimal, bukan dibulatkan. Alasan dan angkanya disimpan di relayer; `planHash` di rantai = `keccak256` dari JSON rencana (urutan kunci tetap), jadi alasan yang dibaca walikota dapat diperiksa terhadap usulan di rantai. Uji ujung ke ujung di testnet: `CITY=0x… node scripts/analyst-e2e.mjs`.
 
 ## Keeper APY (`src/keeper.mjs`)
 

@@ -8,6 +8,7 @@ import {
   ANALIS_ROLE,
   ZERO_ADDRESS,
   askForReason,
+  askForReasonAny,
   buildPlan,
   createAnalyst,
   createPlanStore,
@@ -148,6 +149,32 @@ test("askForReason: sends the key only in the header, turns thinking off, return
   assert.equal(seen.init.headers["x-api-key"], "sk-secret");
   assert.equal(JSON.parse(seen.init.body).thinking.type, "between_tools");
   assert.equal(seen.init.body.includes("sk-secret"), false);
+});
+
+test("askForReason: xKiro goes to its gateway with its own model id, both auth headers and no thinking field", async () => {
+  let seen;
+  const fetchImpl = async (url, init) => {
+    seen = { url, init };
+    return { ok: true, json: async () => ({ content: [{ type: "text", text: "ok 475.00" }] }) };
+  };
+  assert.equal(await askForReason({ provider: "xkiro", apiKey: "xk-secret", fetchImpl }, {}), "ok 475.00");
+  assert.equal(seen.url, "https://api.xkiro.com/v1/messages");
+  assert.equal(seen.init.headers.authorization, "Bearer xk-secret");
+  assert.equal(seen.init.headers["x-api-key"], "xk-secret");
+  const body = JSON.parse(seen.init.body);
+  assert.equal(body.model, "anthropic/claude-sonnet-5");
+  assert.equal("thinking" in body, false);
+  assert.equal(await askForReason({ provider: "nope", apiKey: "k", fetchImpl }, {}), null, "unknown provider");
+});
+
+test("askForReasonAny: falls through to the next provider when the first fails", async () => {
+  const calls = [];
+  const down = { provider: "anthropic", apiKey: "a", fetchImpl: async (url) => { calls.push(url); return { ok: false }; } };
+  const up = { provider: "xkiro", apiKey: "x", fetchImpl: async (url) => { calls.push(url); return { ok: true, json: async () => ({ content: [{ type: "text", text: "dari xkiro" }] }) }; } };
+  assert.equal(await askForReasonAny([down, up], {}), "dari xkiro");
+  assert.deepEqual(calls, ["https://api.anthropic.com/v1/messages", "https://api.xkiro.com/v1/messages"]);
+  assert.equal(await askForReasonAny([down], {}), null);
+  assert.equal(await askForReasonAny([], {}), null);
 });
 
 test("askForReason: any failure or a missing key means null, never a throw", async () => {
@@ -325,7 +352,7 @@ test("list: joins stored plans with on-chain state; run: validates and rate limi
   const first = await analyst.run({ city: CITY });
   assert.ok(first.status);
   await assert.rejects(analyst.run({ city: CITY }), (e) => e.status === 429 && e.extra.retryAfterSeconds > 0);
-  assert.deepEqual(Object.keys(analyst.info()).sort(), ["address", "cooldownSeconds", "enabled", "guardian", "llm", "role", "roleName"]);
+  assert.deepEqual(Object.keys(analyst.info()).sort(), ["address", "cooldownSeconds", "enabled", "guardian", "llm", "llmProviders", "role", "roleName"]);
 });
 
 test("analyst over HTTP: info, proposals, run; and the routes are absent without an analyst", async () => {

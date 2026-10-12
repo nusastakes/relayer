@@ -16,7 +16,7 @@
 //
 // Environment: RELAYER_PRIVATE_KEY (required), MONAD_TESTNET_RPC, FACTORY_ADDRESS, AUSD_FAUCET (set to "" to disable
 // /faucet), PORT (default 8787), ALLOWED_ORIGIN (CORS, comma-separated, default http://localhost:3000), TRUST_PROXY=1 behind a proxy such as Railway, MAX_DEPOSIT_ASSETS,
-// ANALYST_PRIVATE_KEY (turns the Analyst on), PROPOSALS_FILE (default ./data/proposals.json), ANTHROPIC_API_KEY (optional, writes the reasons), ANALYST_LLM=0 to ignore the key, ANALYST_LLM_MODEL,
+// ANALYST_PRIVATE_KEY (turns the Analyst on), PROPOSALS_FILE (default ./data/proposals.json), ANTHROPIC_API_KEY and/or XKIRO_API_KEY (optional, they write the reasons; Anthropic is tried first), ANALYST_LLM=0 to ignore the keys, ANALYST_LLM_MODEL, XKIRO_MODEL,
 // STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off).
 
 import http from "node:http";
@@ -58,7 +58,14 @@ export function buildRelayerFromEnv(env = process.env) {
       publicClient,
       walletClient: createWalletClient({ account: analystAccount, chain, transport: viemHttp(rpc) }),
       store: createPlanStore({ file: proposalsFile || undefined }),
-      llm: env.ANTHROPIC_API_KEY && env.ANALYST_LLM !== "0" ? { apiKey: env.ANTHROPIC_API_KEY, model: env.ANALYST_LLM_MODEL || "claude-sonnet-5-5" } : null,
+      // Reasons are written by Anthropic first and by the xKiro gateway if that fails; neither key is required.
+      llm:
+        env.ANALYST_LLM === "0"
+          ? null
+          : [
+              env.ANTHROPIC_API_KEY && { provider: "anthropic", apiKey: env.ANTHROPIC_API_KEY, model: env.ANALYST_LLM_MODEL || undefined },
+              env.XKIRO_API_KEY && { provider: "xkiro", apiKey: env.XKIRO_API_KEY, model: env.XKIRO_MODEL || undefined },
+            ].filter(Boolean),
       config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian, factory, feed: env.FEED_ADDRESS || DEFAULTS.feed, sourceId: env.APY_SOURCE_ID || DEFAULTS.sourceId, asset: env.AUSD_ADDRESS || DEFAULTS.asset },
     });
   }

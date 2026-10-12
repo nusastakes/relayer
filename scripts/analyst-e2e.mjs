@@ -4,7 +4,7 @@
 //   set -a; . ../.env; set +a; CITY=0x… node scripts/analyst-e2e.mjs
 //
 // DEPLOYER_PRIVATE_KEY must be the mayor of CITY (it grants the role and approves the proposal); ANALYST_PRIVATE_KEY is
-// the bot. ANTHROPIC_API_KEY is optional (the bot writes its reasons with the LLM when it is set). Steps: the mayor
+// the bot. ANTHROPIC_API_KEY and XKIRO_API_KEY are optional (the bot writes its reasons with the LLM when one is set). Steps: the mayor
 // grants ANALIS to the bot -> the bot looks at the city and files a proposal -> the stored reason matches the on-chain
 // planHash -> the mayor approves -> the money has moved.
 
@@ -64,7 +64,10 @@ const bot = createAnalyst({
   publicClient: pub,
   walletClient: botWallet,
   store: createPlanStore(),
-  llm: process.env.ANTHROPIC_API_KEY ? { apiKey: process.env.ANTHROPIC_API_KEY } : null,
+  llm: [
+    process.env.ANTHROPIC_API_KEY && { provider: "anthropic", apiKey: process.env.ANTHROPIC_API_KEY },
+    process.env.XKIRO_API_KEY && { provider: "xkiro", apiKey: process.env.XKIRO_API_KEY },
+  ].filter(Boolean),
   config: { guardian: GUARDIAN, factory: FACTORY, feed: FEED, sourceId: SOURCE_ID, asset: AUSD },
 });
 
