@@ -28,23 +28,35 @@ function bytes32(value, name) {
   return value;
 }
 
-/** Validates the body of POST /deposit. Returns typed values; throws HttpError(400) otherwise. */
-export function parseDepositBody(body) {
+/** Validates a permit-carrying body whose amount lives in `amountField`. Returns typed values with the amount under `amount`. */
+function parsePermitBody(body, amountField) {
   if (!body || typeof body !== "object") throw new HttpError(400, "body must be a JSON object");
   let v = uint(body.v, "v");
   if (v === 0n || v === 1n) v += 27n; // some signers return the recovery id instead of 27/28
   if (v !== 27n && v !== 28n) throw new HttpError(400, "v must be 27 or 28");
-  const assets = uint(body.assets, "assets");
-  if (assets === 0n) throw new HttpError(400, "assets must be greater than zero");
+  const amount = uint(body[amountField], amountField);
+  if (amount === 0n) throw new HttpError(400, `${amountField} must be greater than zero`);
   return {
     vault: address(body.vault, "vault"),
     owner: address(body.owner, "owner"),
-    assets,
+    amount,
     deadline: uint(body.deadline, "deadline"),
     v: Number(v),
     r: bytes32(body.r, "r"),
     s: bytes32(body.s, "s"),
   };
+}
+
+/** Validates the body of POST /deposit. Returns typed values; throws HttpError(400) otherwise. */
+export function parseDepositBody(body) {
+  const { amount, ...fields } = parsePermitBody(body, "assets");
+  return { ...fields, assets: amount };
+}
+
+/** Validates the body of POST /withdraw: the same shape as a deposit, but the amount is `shares`. */
+export function parseWithdrawBody(body) {
+  const { amount, ...fields } = parsePermitBody(body, "shares");
+  return { ...fields, shares: amount };
 }
 
 export function parseFaucetBody(body) {

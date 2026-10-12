@@ -5,17 +5,24 @@
 // signer of the permit, whoever submits the transaction.
 
 import { parseAbi, parseEventLogs } from "viem";
-import { HttpError, Mutex, createRateLimiter, parseDepositBody, parseFaucetBody } from "./guards.mjs";
+import { HttpError, Mutex, createRateLimiter, parseDepositBody, parseFaucetBody, parseWithdrawBody } from "./guards.mjs";
 
 export const vaultAbi = parseAbi([
   "function depositWithPermit(address owner, uint256 assets, uint256 deadline, uint8 v, bytes32 r, bytes32 s) returns (uint256 shares)",
+  "function redeemWithPermit(address owner, uint256 shares, uint256 deadline, uint8 v, bytes32 r, bytes32 s) returns (uint256 assets)",
   "function maxDeposit(address) view returns (uint256)",
+  "function maxRedeem(address) view returns (uint256)",
   "event Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)",
+  "event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares)",
 ]);
 export const factoryAbi = parseAbi(["function isCity(address) view returns (bool)"]);
 export const faucetAbi = parseAbi(["function requestFunds(address recipient)"]);
 
 const shortReason = (e) => (e?.shortMessage || e?.message || String(e)).split("\n")[0].slice(0, 200);
+/** Every place a revert reason can hide: message, details, and raw revert data. */
+const fullReason = (e) => [e?.shortMessage, e?.message, e?.details, e?.data, e?.cause?.data, e?.cause?.message].filter(Boolean).join(" ");
+/** The faucet's `MaxFrequencyExceeded()` error, which is not in our ABI so viem cannot name it. */
+export const FAUCET_FREQUENCY_ERROR = /MaxFrequencyExceeded|0x20e5bc67/;
 
 export function createRelayer({ publicClient, walletClient, config, now = () => Date.now() }) {
   const c = {
@@ -26,11 +33,16 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     minBalance: config.minBalance ?? 10n ** 17n, // 0.1 MON
     gasMultiplierPercent: config.gasMultiplierPercent ?? 125n,
     maxGas: config.maxGas ?? 1_500_000n,
+    gasDripWei: config.gasDripWei ?? 5n * 10n ** 17n, // 0.5 MON
+    gasDripBelowWei: config.gasDripBelowWei ?? 25n * 10n ** 16n, // only to wallets holding less than 0.25 MON
   };
   const account = walletClient.account;
   const mutex = new Mutex();
   const perOwner = createRateLimiter({ windowMs: 60_000, max: 3, now });
+  const perOwnerWithdraw = createRateLimiter({ windowMs: 60_000, max: 3, now });
   const perFaucetAddress = createRateLimiter({ windowMs: 10 * 60_000, max: 1, now });
+  const perDripAddress = createRateLimiter({ windowMs: 24 * 3_600_000, max: 1, now });
+  const dripGlobal = createRateLimiter({ windowMs: 3_600_000, max: config.gasDripsPerHour ?? 20, now });
   const global = createRateLimiter({ windowMs: 60_000, max: config.globalPerMinute ?? 30, now });
 
   function guardRate(limiter, key, label) {
@@ -40,9 +52,20 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     }
   }
 
-  async function requireFunds() {
+  async function requireFunds(needed = 0n) {
     const balance = await publicClient.getBalance({ address: account.address });
-    if (balance < c.minBalance) throw new HttpError(503, "relayer is out of gas funds");
+    if (balance < c.minBalance || balance < needed) throw new HttpError(503, "relayer is out of gas funds");
+  }
+
+  /**
+   * Monad rejects a transaction unless balance >= gasLimit x maxFeePerGas (and then charges gasLimit x the effective
+   * price), so a tight maxFeePerGas matters: 1.5x the current base fee plus the tip instead of viem's 2x default.
+   */
+  async function feeCaps() {
+    const block = await publicClient.getBlock();
+    if (block.baseFeePerGas === undefined || block.baseFeePerGas === null) return {};
+    const tip = publicClient.estimateMaxPriorityFeePerGas ? await publicClient.estimateMaxPriorityFeePerGas().catch(() => 0n) : 0n;
+    return { maxFeePerGas: (block.baseFeePerGas * 3n) / 2n + tip, maxPriorityFeePerGas: tip };
   }
 
   async function send(request) {
@@ -55,8 +78,10 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
     // Monad charges the gas limit, not the gas used, so keep it close to the estimate.
     gas = (gas * c.gasMultiplierPercent) / 100n;
     if (gas > c.maxGas) gas = c.maxGas;
+    const fees = await feeCaps();
+    if (fees.maxFeePerGas) await requireFunds(gas * fees.maxFeePerGas);
     return mutex.run(async () => {
-      const hash = await walletClient.writeContract({ ...request, gas });
+      const hash = await walletClient.writeContract({ ...request, gas, ...fees });
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
       return { hash, receipt };
     });
@@ -100,6 +125,57 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
       };
     },
 
+    /** POST /withdraw: redeem the owner's shares with a signed share permit; the assets go to the owner. */
+    async withdraw(rawBody) {
+      const b = parseWithdrawBody(rawBody);
+      const nowSeconds = BigInt(Math.floor(now() / 1000));
+      if (b.deadline < nowSeconds + BigInt(c.minDeadlineSeconds)) throw new HttpError(400, "permit deadline is too close or already passed");
+      guardRate(perOwnerWithdraw, b.owner.toLowerCase(), "withdraw");
+
+      const isCity = await publicClient.readContract({ address: c.factory, abi: factoryAbi, functionName: "isCity", args: [b.vault] });
+      if (!isCity) throw new HttpError(400, "vault was not created by the city factory");
+      const held = await publicClient.readContract({ address: b.vault, abi: vaultAbi, functionName: "maxRedeem", args: [b.owner] });
+      if (b.shares > held) throw new HttpError(400, `owner only holds ${held} shares`);
+      await requireFunds();
+
+      const { hash, receipt } = await send({
+        address: b.vault,
+        abi: vaultAbi,
+        functionName: "redeemWithPermit",
+        args: [b.owner, b.shares, b.deadline, b.v, b.r, b.s],
+      });
+      const [withdrawal] = parseEventLogs({ abi: vaultAbi, eventName: "Withdraw", logs: receipt.logs });
+      return {
+        hash,
+        status: receipt.status,
+        gasUsed: receipt.gasUsed.toString(),
+        assets: withdrawal ? withdrawal.args.assets.toString() : null,
+        receiver: withdrawal ? withdrawal.args.receiver : null,
+      };
+    },
+
+    /**
+     * POST /gas-drip (testnet only): a small amount of MON for a wallet that has to send its own transactions, for
+     * example a mayor founding a city or a session key rebalancing. Once per address per day, only to wallets that
+     * hold less than `gasDripBelowWei`, and capped per hour overall.
+     */
+    async gasDrip(rawBody) {
+      const b = parseFaucetBody(rawBody);
+      if (b.address.toLowerCase() === account.address.toLowerCase()) throw new HttpError(400, "that is the relayer itself");
+      const held = await publicClient.getBalance({ address: b.address });
+      if (held >= c.gasDripBelowWei) throw new HttpError(400, `address already holds ${held} wei, no drip needed`);
+      if (!dripGlobal.hit("all")) throw new HttpError(429, "gas drips are used up for this hour", { retryAfterSeconds: Math.ceil(dripGlobal.retryAfterMs("all") / 1000) });
+      guardRate(perDripAddress, b.address.toLowerCase(), "gas-drip");
+      const fees = await feeCaps();
+      await requireFunds(c.gasDripWei + 21_000n * (fees.maxFeePerGas ?? 0n));
+      const hash = await mutex.run(async () => {
+        const h = await walletClient.sendTransaction({ to: b.address, value: c.gasDripWei, gas: 21_000n, ...fees });
+        await publicClient.waitForTransactionReceipt({ hash: h });
+        return h;
+      });
+      return { hash, recipient: b.address, amountWei: c.gasDripWei.toString() };
+    },
+
     /** POST /faucet (testnet only): free AUSD for a new resident, gas paid by the relayer. */
     async faucet(rawBody) {
       const b = parseFaucetBody(rawBody);
@@ -110,9 +186,10 @@ export function createRelayer({ publicClient, walletClient, config, now = () => 
       try {
         await publicClient.simulateContract({ ...request, account });
       } catch (e) {
-        const reason = shortReason(e);
-        if (/MaxFrequencyExceeded/.test(reason)) throw new HttpError(429, "the faucet was used a moment ago, try again", { retryAfterSeconds: 20 });
-        throw new HttpError(400, `faucet would refuse: ${reason}`);
+        if (FAUCET_FREQUENCY_ERROR.test(fullReason(e))) {
+          throw new HttpError(429, "the faucet was used a moment ago, try again", { retryAfterSeconds: 20 });
+        }
+        throw new HttpError(400, `faucet would refuse: ${shortReason(e)}`);
       }
       const { hash, receipt } = await send(request);
       return { hash, status: receipt.status, recipient: b.address };

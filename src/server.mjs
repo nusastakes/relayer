@@ -5,6 +5,8 @@
 //
 //   GET  /health
 //   POST /deposit   { vault, owner, assets, deadline, v, r, s }   -> { hash, status, shares, sharesOwner }
+//   POST /withdraw  { vault, owner, shares, deadline, v, r, s }   -> { hash, status, assets, receiver }
+//   POST /gas-drip  { address }                                   -> { hash, recipient, amountWei }   (testnet MON for mayors)
 //   POST /faucet    { address }                                   -> { hash, status, recipient }   (testnet AUSD)
 //
 // Environment: RELAYER_PRIVATE_KEY (required), MONAD_TESTNET_RPC, FACTORY_ADDRESS, AUSD_FAUCET (set to "" to disable
@@ -18,7 +20,7 @@ import { createRelayer } from "./relayer.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
-  factory: "0xA54D964a4bF13be1E5AF05D5c7290f275f13B24C", // CityFactory, contracts/deployments/monad-testnet.json
+  factory: "0x6765F0C80F6a7D5EC7Af120d12e81628F641508E", // CityFactory, contracts/deployments/monad-testnet.json
   faucet: "0xd236c18D274E54FAccC3dd9DDA4b27965a73ee6C", // Agora AUSD testnet faucet
 };
 
@@ -73,6 +75,8 @@ export function createHttpServer(relayer, { allowedOrigin = "http://localhost:30
       if (req.method === "OPTIONS") return send(204, {});
       if (req.method === "GET" && path === "/health") return send(200, await relayer.health());
       if (req.method === "POST" && path === "/deposit") return send(200, await relayer.deposit(await readJson(req)));
+      if (req.method === "POST" && path === "/withdraw") return send(200, await relayer.withdraw(await readJson(req)));
+      if (req.method === "POST" && path === "/gas-drip") return send(200, await relayer.gasDrip(await readJson(req)));
       if (req.method === "POST" && path === "/faucet") return send(200, await relayer.faucet(await readJson(req)));
       throw new HttpError(404, "not found");
     } catch (e) {

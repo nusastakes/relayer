@@ -6,19 +6,20 @@
 // Steps: found a city (the relayer key acts as mayor) -> a brand-new resident with NO MON gets AUSD through the
 // relayer's /faucet -> the resident signs an EIP-2612 permit -> the relayer submits depositWithPermit through /deposit
 // -> the mayor moves half of the city into the simulated-yield adapter -> wait and read the simulated yield ->
-// the resident (after a small gas top-up) redeems everything.
+// the resident withdraws everything through the relayer too, still without any MON.
 
 import { createPublicClient, createWalletClient, defineChain, http, parseAbi, parseEventLogs } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { buildRelayerFromEnv, createHttpServer } from "../src/server.mjs";
 
 const RPC = process.env.MONAD_TESTNET_RPC || "https://testnet-rpc.monad.xyz";
-const FACTORY = "0xA54D964a4bF13be1E5AF05D5c7290f275f13B24C";
-const MIRROR_IMPL = "0xdB96a6a8B70034c0Ef24170d3B4d5E2320FaeA60";
+const FACTORY = "0x6765F0C80F6a7D5EC7Af120d12e81628F641508E";
+const MIRROR_IMPL = "0x25BcA4f0ea34F115Cb7c620626fBBa95647E8690";
 const AUSD = "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC";
-const FEED = "0xaA223d6F2047df4D4f47626f65e6873419524fe6";
+const FEED = "0x707A675DDc976B0E9C6B520Dbd0326204F30d540";
 const SOURCE_ID = "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d";
 const DEPOSIT = 100_000_000n; // 100 AUSD
+const CITY_NAME = "E2E smoke test (ignore)";
 const WAIT_FOR_YIELD_SECONDS = Number(process.env.WAIT_FOR_YIELD_SECONDS || 90);
 
 const chain = defineChain({ id: 10143, name: "Monad Testnet", nativeCurrency: { name: "Monad", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [RPC] } } });
@@ -34,7 +35,7 @@ const vaultAbi = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function convertToAssets(uint256) view returns (uint256)",
   "function rebalance(address from, address to, uint256 amount, bytes32 planHash)",
-  "function redeem(uint256 shares, address receiver, address owner) returns (uint256)",
+  "function nonces(address) view returns (uint256)",
 ]);
 const tokenAbi = parseAbi(["function balanceOf(address) view returns (uint256)", "function nonces(address) view returns (uint256)", "function transfer(address,uint256) returns (bool)"]);
 const feedAbi = parseAbi(["function latest(bytes32) view returns (uint32 apyBps, uint64 observedAt, uint64 updatedAt)"]);
@@ -67,14 +68,16 @@ const base = `http://127.0.0.1:${server.address().port}`;
 const mayor = privateKeyToAccount(process.env.RELAYER_PRIVATE_KEY);
 const mayorWallet = createWalletClient({ account: mayor, chain, transport: http(RPC) });
 const resident = privateKeyToAccount(generatePrivateKey());
-const residentWallet = createWalletClient({ account: resident, chain, transport: http(RPC) });
 const result = { chainId: 10143, mayor: mayor.address, resident: resident.address, txs: {} };
 
 try {
   log("health:", await (await fetch(base + "/health")).json());
 
   log("\n1. mayor founds a city");
-  let hash = await mayorWallet.writeContract({ address: FACTORY, abi: factoryAbi, functionName: "createCity", args: ["E2E smoke test (ignore)", "", 1000, [MIRROR_IMPL], ""], gas: 4_000_000n });
+  const createArgs = [CITY_NAME, "E2E", 1000, [MIRROR_IMPL], "ipfs://e2e"];
+  // Monad charges the gas LIMIT, so estimate instead of using a round number.
+  const createGas = ((await pub.estimateContractGas({ address: FACTORY, abi: factoryAbi, functionName: "createCity", args: createArgs, account: mayor })) * 11n) / 10n;
+  let hash = await mayorWallet.writeContract({ address: FACTORY, abi: factoryAbi, functionName: "createCity", args: createArgs, gas: createGas });
   let receipt = await pub.waitForTransactionReceipt({ hash });
   const [created] = parseEventLogs({ abi: factoryAbi, eventName: "CityCreated", logs: receipt.logs });
   const vault = created.args.vault;
@@ -111,7 +114,7 @@ try {
   if (shares === 0n || monAfter !== 0n) throw new Error("deposit did not behave as expected");
 
   log("\n4. mayor moves half of the city into the simulated-yield adapter");
-  hash = await mayorWallet.writeContract({ address: vault, abi: vaultAbi, functionName: "rebalance", args: ["0x0000000000000000000000000000000000000000", mirror, DEPOSIT / 2n, "0x" + "00".repeat(31) + "01"], gas: 600_000n });
+  hash = await mayorWallet.writeContract({ address: vault, abi: vaultAbi, functionName: "rebalance", args: ["0x0000000000000000000000000000000000000000", mirror, DEPOSIT / 2n, "0x" + "00".repeat(31) + "01"], gas: 400_000n });
   receipt = await pub.waitForTransactionReceipt({ hash });
   result.txs.rebalance = hash;
   log(`  rebalance tx ${hash} ${receipt.status}; adapter principal ${fmt(await pub.readContract({ address: mirror, abi: mirrorAbi, functionName: "principal" }))}`);
@@ -124,27 +127,26 @@ try {
   log(`  adapter totalAssets ${before} -> ${after} (raw units, 6 decimals): grew by ${after - before}`);
   result.yieldGrowthRawUnits = (after - before).toString();
 
-  log("\n6. resident (after a small gas top-up from the relayer) redeems everything");
-  hash = await mayorWallet.sendTransaction({ to: resident.address, value: 10n ** 17n });
-  await pub.waitForTransactionReceipt({ hash });
-  // A freshly funded wallet needs a few seconds before the network accepts its first transaction.
-  await sleep(5);
+  log("\n6. resident withdraws everything WITHOUT holding MON: signs a share permit, the relayer pays the gas");
   const claim = await pub.readContract({ address: vault, abi: vaultAbi, functionName: "convertToAssets", args: [shares] });
-  for (let attempt = 1; ; attempt++) {
-    try {
-      hash = await residentWallet.writeContract({ address: vault, abi: vaultAbi, functionName: "redeem", args: [shares, resident.address, resident.address], gas: 800_000n });
-      break;
-    } catch (e) {
-      if (attempt >= 4) throw e;
-      log(`  first transaction of the new wallet was refused (${(e.shortMessage || e.message).split("\n")[0]}); retrying in 4s (${attempt}/3)`);
-      await sleep(4);
-    }
-  }
-  receipt = await pub.waitForTransactionReceipt({ hash });
-  result.txs.redeem = hash;
+  const wDeadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+  const shareNonce = await pub.readContract({ address: vault, abi: vaultAbi, functionName: "nonces", args: [resident.address] });
+  const wSig = await resident.signTypedData({
+    domain: { name: CITY_NAME, version: "1", chainId: 10143, verifyingContract: vault },
+    types: { Permit: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
+    primaryType: "Permit",
+    message: { owner: resident.address, spender: vault, value: shares, nonce: shareNonce, deadline: wDeadline },
+  });
+  const wr = "0x" + wSig.slice(2, 66), ws = "0x" + wSig.slice(66, 130), wv = parseInt(wSig.slice(130, 132), 16);
+  const wd = await post(base, "/withdraw", { vault, owner: resident.address, shares: shares.toString(), deadline: wDeadline.toString(), v: wv, r: wr, s: ws });
+  result.txs.withdraw = wd.hash;
   const back = await pub.readContract({ address: AUSD, abi: tokenAbi, functionName: "balanceOf", args: [resident.address] });
   const startAusd = ausd; // 10,000 AUSD from the faucet, 100 deposited
-  log(`  redeem tx ${hash} ${receipt.status}; claim before ${fmt(claim)} AUSD; resident AUSD ${fmt(startAusd - DEPOSIT)} -> ${fmt(back)} (started with ${fmt(startAusd)})`);
+  const monEnd = await pub.getBalance({ address: resident.address });
+  log(`  withdraw tx ${wd.hash} ${wd.status}, gasUsed ${wd.gasUsed}; assets paid ${fmt(BigInt(wd.assets))} to ${wd.receiver}`);
+  log(`  claim before ${fmt(claim)} AUSD; resident AUSD ${fmt(startAusd - DEPOSIT)} -> ${fmt(back)} (started with ${fmt(startAusd)}); resident MON at the end: ${monEnd}`);
+  if (monEnd !== 0n) throw new Error("the resident ended up holding MON");
+  if (wd.receiver.toLowerCase() !== resident.address.toLowerCase()) throw new Error("assets were not paid to the resident");
   result.depositedAssets = DEPOSIT.toString();
   result.assetsReturned = (back - (startAusd - DEPOSIT)).toString();
   if (back < startAusd - 1n) throw new Error("resident got back less than deposited");
