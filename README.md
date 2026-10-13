@@ -20,6 +20,8 @@ tangan permit), siapa pun pengirimnya.
 | `POST /gas-drip` | `{ address }` (hanya testnet) | `{ hash, recipient, amountWei }`: 1 MON untuk walikota atau kunci sesinya (cukup untuk `createCity`, yang butuh saldo sekitar 0,63 MON), sekali per alamat per hari, hanya bila saldo < 0,7 MON |
 | `POST /style` | `{ vault, code, nonce, signature }`; `signature` = EIP-712 `CityStyle(address vault, string code, uint256 nonce)` dari akun **walikota**, domain `{ name: "Nusastakes", version: "1", chainId: 10143 }` (tanpa `verifyingContract`) | `{ vault, code, nonce }`. `code` kosong atau `<tema>.<topeng base36>` (huruf kecil, angka, `-`, `_`; maksimal 32 karakter), `nonce` harus lebih besar dari yang tersimpan (nonce pertama boleh 0). `403` bila penanda tangan bukan `vault.mayor()`, `409` bila nonce basi |
 | `GET /style/:vault` | | `{ code, nonce }` (`code: ""` bila belum ada) |
+| `PUT /map/:uri` | `{ vault, map, signature }`; `:uri` = `mapURI` kota (`osm:<lat>,<lon>` atau bentuk lain dengan huruf, angka, `: . , _ + @ -`, maksimal 80 karakter); `signature` = EIP-712 `CityMap(address vault, string uri, bytes32 mapHash)` dari akun **walikota** (domain sama dengan `/style`), `mapHash = keccak256(JSON.stringify(map))` | `{ uri, vault, mapHash, bytes, signer, createdAt }`. `map` harus objek dengan `id` sama dengan `:uri` serta larik `buildings` dan `roads`, maksimal 600 KB (`413`); `400` bila `vault` bukan kota buatan factory atau `vault.mapURI()` bukan `:uri`; `403` bila penanda tangan bukan `vault.mayor()`; `409` bila peta untuk `:uri` sudah ada (penulisan pertama menang dan tidak pernah diganti); `429` bila lebih dari 10 unggahan per menit per alamat IP; `503` bila cache penuh (500 peta atau 150 MB) |
+| `GET /map/:uri` | | peta yang tersimpan, dengan `Cache-Control: public, max-age=86400`; `404` bila belum ada |
 | `PUT /book` | `{ owner, id, ciphertext, nonce, signature }`; `signature` = EIP-712 `BookEntry(address owner, string id, bytes32 ciphertextHash, uint256 nonce)` dari akun **pemilik** (domain sama dengan `/style`), `ciphertext` hex maksimal 16 KB, `id` 1–64 karakter | `{ owner, id, hash, bytes, createdAt, nonce }` dengan `hash = keccak256(ciphertext)` (nilai yang dipakai klien sebagai `planHash` di `rebalance`). Penyimpanan **ciphertext saja** untuk buku strategi tersegel: entri tidak pernah ditimpa (`409`), `nonce` harus naik (nonce pertama boleh 0), maksimal 200 entri per pemilik, `403` bila bukan tanda tangan pemilik |
 | `GET /book/:owner`, `GET /book/:owner/:id` | | daftar entri tanpa ciphertext beserta `nonce` terakhir (`"-1"` bila kosong), dan satu entri lengkap dengan ciphertext; publik, karena ciphertext tanpa kunci tidak berguna |
 | `GET /agents` | | staf AI yang bisa dipekerjakan walikota (Satpam, Analis, Humas) dengan peran, alamat, status, dan identitas ERC-8004 (`erc8004`: `agentId`, pemilik, `agentURI`, rata-rata penilaian) |
@@ -27,7 +29,7 @@ tangan permit), siapa pun pengirimnya.
 | `GET /marketplace` | | bursa staf: agen tim dan agen komunitas yang lolos pemeriksaan, urut rata-rata penilaian ERC-8004; `?city=0x…` menambahkan `hiredInCity` per agen |
 | `POST /marketplace/apply` | `{ "agentId": "…" }` | agen pihak ketiga mengajukan diri; server memeriksa identitas, dompet, berkas registrasinya, dan listing terbuka milik pemiliknya di kontrak `AgentMarketplace` (panduan: `AGENTS.md`) |
 | `GET /watchdog` | | status penjaga karantina: pemindaian terakhir, jumlah kota dan adapter, tindakan terbaru, galat |
-| `GET /config` | | alamat kontrak v3 (`factory`, `guardian`, `feed`, `reserve`, `marketplace`, `asset`, registry ERC-8004), `version`, `deployBlock`: satu sumber untuk frontend |
+| `GET /config` | | alamat kontrak v3 (`factory`, `guardian`, `feed`, `reserve`, `marketplace`, `asset`, `mirrorAdapterImpl` = implementasi `MirrorYieldAdapter` yang diizinkan factory, registry ERC-8004), `version`, `deployBlock`: satu sumber untuk frontend |
 | `GET /agents/:id/card.json` | | berkas registrasi ERC-8004 agen (`satpam`, `analis`, `humas`), yang menjadi `agentURI` di registry |
 | `GET /leaderboard` | | kota diurutkan menurut return sejak berdiri: `{ rank, name, community, mayor, tvl, returnBps, residents, createdAt, ranked }`. TVL dan return dibaca langsung dari rantai, jumlah penduduk dari pencatat. Kota dengan TVL di bawah 1 AUSD atau tanpa share tidak diberi peringkat (`rank: null`), karena harga share kota kosong tidak berarti |
 | `GET /metrics`, `GET /index` | | angka platform untuk cerita traksi (kota, walikota, penduduk, TVL, jumlah setor dan tarik) dan kemajuan pencatat (`complete`, `behindBlocks`) |
@@ -58,7 +60,7 @@ proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INT
 tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `BOOK_FILE` (bawaan `./data/book.json`, kosongkan untuk mematikan `/book`), `TRUST_PROXY_HOPS` (jumlah proxy tepercaya di depan relayer; **di Railway 2**, lihat bagian keamanan), `RUN_INDEXER=1` (menjalankan pencatat), `INDEX_FILE` (bawaan `./data/index.json`), `INDEX_RANGE` (blok per permintaan `getLogs`, bawaan 100), `INDEX_START_BLOCK` (bawaan blok deploy factory v2, 70461935), `INDEXER=0` / `ECONOMY=0` untuk mematikan, `HUMAS_ADDRESS` (menyalakan Humas), `ANTHROPIC_API_KEY` dan/atau `XKIRO_API_KEY` (opsional; Sonnet menulis alasan usulan, Anthropic dicoba lebih dulu lalu gateway xKiro
 dengan model `anthropic/claude-sonnet-5` atau `XKIRO_MODEL`; `ANALYST_LLM=0` mengabaikannya), `STYLE_FILE` (berkas JSON
 tempat gaya kota disimpan, bawaan `./data/styles.json`; isi dengan jalur di volume agar bertahan lintas deploy, kosongkan untuk
-mematikan `/style`).
+mematikan `/style`), `MAPS_DIR` (folder cache peta kota, satu berkas per peta ditambah `index.json`; bawaan `./data/maps`, Railway `/data/maps`, kosongkan untuk mematikan `/map`), `MIRROR_ADAPTER_IMPL` (nilai `mirrorAdapterImpl` di `/config`).
 
 ### Hosting di Railway
 
@@ -173,6 +175,7 @@ Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`,
 
 - Akun Mera adalah EOA biasa menurut dokumentasi resmi dan `toViemAccount` mendukung `signTypedData`, tetapi permit
   belum ditandatangani dengan Mera sungguhan.
+- Cache peta (`/map`) hanya tampilan dan data masukan tak tepercaya: frontend harus memeriksa bentuknya dan tidak boleh memakainya untuk apa pun yang menyangkut dana. Dua kota yang memilih `mapURI` sama (lokasi sama, atau `preset:`) berbagi satu entri, jadi walikota yang menulis lebih dulu menentukan peta untuk lokasi itu; penulisan pertama tidak bisa diganti.
 - Gaya kota (`/style`) hanya tampilan dan tidak memengaruhi dana. Isinya disimpan di berkas JSON milik server: tidak bisa
   diperiksa orang luar seperti event onchain, dan hilang bila deploy ulang tanpa volume (di Railway sudah dipasang volume di `/data`). Tanda tangan walikota memastikan
   hanya walikota yang mengubah, tetapi operator relayer tetap bisa mengubah berkasnya. Tempat yang benar untuk jangka

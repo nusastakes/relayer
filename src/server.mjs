@@ -10,6 +10,8 @@
 //   POST /faucet    { address }                                   -> { hash, status, recipient }   (testnet AUSD)
 //   POST /style     { vault, code, nonce, signature }             -> { vault, code, nonce }   (mayor-signed EIP-712 CityStyle, see src/style.mjs)
 //   GET  /style/:vault                                            -> { code, nonce }
+//   PUT  /map/:uri { vault, map, signature }                      -> { uri, mapHash, ... }   (OpenStreetMap city map cache, mayor-signed EIP-712 CityMap, first write wins, see src/maps.mjs)
+//   GET  /map/:uri                                                -> the cached map (Cache-Control: public, max-age=86400), 404 if none
 //   PUT  /book { owner, id, ciphertext, nonce, signature }        -> { hash, ... }   (sealed strategy book: ciphertext only, see src/book.mjs)
 //   GET  /book/:owner  and  GET /book/:owner/:id                  -> entries (ciphertext on the second)
 //   GET  /leaderboard, /metrics, /index, /economy                 -> cities ranked by return with live TVL and indexed residents; platform numbers; indexer progress; DefiLlama fees per sector
@@ -23,7 +25,8 @@
 // /faucet), PORT (default 8787), ALLOWED_ORIGIN (CORS, comma-separated, default http://localhost:3000), TRUST_PROXY=1 behind a proxy such as Railway, MAX_DEPOSIT_ASSETS,
 // INDEX_FILE (default ./data/index.json), INDEXER=0 / ECONOMY=0 to turn those off, INDEX_RANGE (logs per request, default 100; some RPCs allow 10000), INDEX_RPC (a separate RPC for getLogs only, e.g. Envio HyperRPC), INDEX_START_BLOCK, HUMAS_ADDRESS (turns the Humas on),
 // BOOK_FILE (default ./data/book.json, "" turns /book off), ANALYST_PRIVATE_KEY (turns the Analyst on), PROPOSALS_FILE (default ./data/proposals.json), ANTHROPIC_API_KEY and/or XKIRO_API_KEY (optional, they write the reasons; Anthropic is tried first), ANALYST_LLM=0 to ignore the keys, ANALYST_LLM_MODEL, XKIRO_MODEL,
-// STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off).
+// STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off),
+// MAPS_DIR (where cached city maps are saved, default ./data/maps; set it to a volume path in production, set to "" to turn /map off), MIRROR_ADAPTER_IMPL (the MirrorYieldAdapter implementation the factory allows, shown by /config).
 
 import http from "node:http";
 import net from "node:net";
@@ -32,6 +35,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { HttpError, createMemo, createRateLimiter } from "./guards.mjs";
 import { createRelayer, factoryAbi } from "./relayer.mjs";
 import { createStyleStore } from "./style.mjs";
+import { createMapStore } from "./maps.mjs";
 import { createBookStore } from "./book.mjs";
 import { createEconomy } from "./economy.mjs";
 import { createHumas } from "./humas.mjs";
@@ -48,6 +52,7 @@ const DEFAULTS = {
   factory: "0xDC9A322E95E7d9214fA794D39534a15B4aB3d9fF", // CityFactory, contracts/deployments/monad-testnet.json
   faucet: "0xd236c18D274E54FAccC3dd9DDA4b27965a73ee6C", // Agora AUSD testnet faucet
   styleFile: "./data/styles.json",
+  mapsDir: "./data/maps",
   proposalsFile: "./data/proposals.json",
   bookFile: "./data/book.json",
   indexFile: "./data/index.json",
@@ -59,6 +64,7 @@ const DEFAULTS = {
   market: "0x241E3f8f02C53e075794989b9E7BD9832e539D29", // AgentMarketplace (contracts v3)
   feed: "0x3328AEbB57Ee0bc8d2C7f68468dEe6B9b50926b5", // ApyFeed
   reserve: "0x40e194d12BC3F6a6b26E8B7808f749c88281Ef96", // YieldReserve
+  mirrorImpl: "0x156fDb80Bd936f1CF1d45A1a167B660A82043080", // MirrorYieldAdapter implementation the factory allows (clones of it are the cities' adapters)
   sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d", // morpho-grove-steakhouse-high-yield-ausd-mainnet
   asset: "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC", // AUSD testnet
 };
@@ -74,6 +80,8 @@ export function buildRelayerFromEnv(env = process.env) {
   const factory = env.FACTORY_ADDRESS || DEFAULTS.factory;
   const styleFile = env.STYLE_FILE === undefined ? DEFAULTS.styleFile : env.STYLE_FILE;
   const style = styleFile ? createStyleStore({ publicClient, factory, file: styleFile }) : null;
+  const mapsDir = env.MAPS_DIR === undefined ? DEFAULTS.mapsDir : env.MAPS_DIR;
+  const maps = mapsDir ? createMapStore({ publicClient, factory, dir: mapsDir }) : null;
   // Staff text (Analis reasons, Humas reports) is written by Anthropic first and by the xKiro gateway if that fails; neither key is required.
   const llm =
     env.ANALYST_LLM === "0"
@@ -148,6 +156,7 @@ export function buildRelayerFromEnv(env = process.env) {
       guardian: guardianAddress,
       feed: env.FEED_ADDRESS || env.APY_FEED_ADDRESS || DEFAULTS.feed,
       reserve: env.YIELD_RESERVE_ADDRESS || DEFAULTS.reserve || null,
+      mirrorAdapterImpl: env.MIRROR_ADAPTER_IMPL || DEFAULTS.mirrorImpl || null,
       marketplace: env.MARKETPLACE_ADDRESS || DEFAULTS.market,
       asset: DEFAULTS.asset,
       identityRegistry: identity?.registry.identity ?? null,
@@ -155,6 +164,7 @@ export function buildRelayerFromEnv(env = process.env) {
       deployBlock: Number(env.FACTORY_DEPLOY_BLOCK || DEFAULTS.factoryDeployBlock),
     },
     style,
+    maps,
     analyst,
     book,
     indexer,
@@ -261,6 +271,16 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (relayer.style && req.method === "GET" && path.startsWith("/style/")) {
         const vault = decodeURIComponent(path.slice("/style/".length));
         return send(200, await memo(`style:${vault.toLowerCase().slice(0, 42)}`, 5_000, () => relayer.style.getWithChain(vault)));
+      }
+      if (relayer.maps && path.startsWith("/map/") && (req.method === "GET" || req.method === "PUT")) {
+        let uri;
+        try {
+          uri = decodeURIComponent(path.slice("/map/".length));
+        } catch {
+          throw new HttpError(400, "the map key is not valid");
+        }
+        if (req.method === "GET") return send(200, relayer.maps.get(uri), { "cache-control": "public, max-age=86400" });
+        return send(200, await relayer.maps.put(uri, await readJson(req, 700_000), ctx));
       }
       if (relayer.indexer && req.method === "GET" && path === "/leaderboard") return send(200, await memo("leaderboard", 10_000, () => relayer.indexer.leaderboard()));
       if (relayer.indexer && req.method === "GET" && path === "/metrics") return send(200, await memo("metrics", 10_000, () => relayer.indexer.metrics()));
