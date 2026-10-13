@@ -39,6 +39,7 @@ import { createIndexer } from "./indexer.mjs";
 import { agentList } from "./agents.mjs";
 import { createAnalyst, createPlanStore } from "./analyst.mjs";
 import { createAgentIdentity } from "./erc8004.mjs";
+import { createPaidReports } from "./x402.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
@@ -108,8 +109,10 @@ export function buildRelayerFromEnv(env = process.env) {
     env.HUMAS_ADDRESS && indexer
       ? createHumas({ publicClient, indexer, address: env.HUMAS_ADDRESS, llm, analystStore: analyst?.store ?? null, bookStore: book, config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian } })
       : null;
+  // Pay-per-report with x402 (testnet facilitator); needs the Humas agent. Off with X402=0.
+  const x402 = env.X402 === "0" || !humas ? null : createPaidReports({ humas, payTo: env.HUMAS_ADDRESS, price: env.X402_PRICE || "$0.01", publicUrl: env.PUBLIC_URL || DEFAULTS.publicUrl });
   // ERC-8004 identity of the staff (testnet registries). Off with ERC8004=0; agents show as unregistered if the file is missing.
-  const identity = env.ERC8004 === "0" ? null : createAgentIdentity({ publicClient, file: env.ERC8004_FILE === undefined ? DEFAULTS.erc8004File : env.ERC8004_FILE || null, baseUrl: env.PUBLIC_URL || DEFAULTS.publicUrl });
+  const identity = env.ERC8004 === "0" ? null : createAgentIdentity({ publicClient, file: env.ERC8004_FILE === undefined ? DEFAULTS.erc8004File : env.ERC8004_FILE || null, baseUrl: env.PUBLIC_URL || DEFAULTS.publicUrl, x402Agents: x402 ? ["humas"] : [] });
   return createRelayer({
     publicClient,
     walletClient,
@@ -120,6 +123,7 @@ export function buildRelayerFromEnv(env = process.env) {
     humas,
     economy,
     identity,
+    x402,
     config: {
       factory,
       faucet: env.AUSD_FAUCET === undefined ? DEFAULTS.faucet : env.AUSD_FAUCET || null,
@@ -187,13 +191,18 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
   return http.createServer(async (req, res) => {
     const origin = req.headers.origin;
     const allowOrigin = allowedOrigins.includes("*") ? "*" : origin && allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+    // payment-signature goes in, payment-required and payment-response come out, for browsers that pay with x402.
+    const corsHeaders = {
+      "access-control-allow-origin": allowOrigin,
+      vary: "origin",
+      "access-control-allow-methods": "GET,POST,PUT,OPTIONS",
+      "access-control-allow-headers": "content-type,payment-signature",
+      "access-control-expose-headers": "payment-required,payment-response",
+    };
     const send = (status, payload, extraHeaders = {}) => {
       res.writeHead(status, {
         "content-type": "application/json",
-        "access-control-allow-origin": allowOrigin,
-        vary: "origin",
-        "access-control-allow-methods": "GET,POST,PUT,OPTIONS",
-        "access-control-allow-headers": "content-type",
+        ...corsHeaders,
         ...extraHeaders,
       });
       res.end(JSON.stringify(payload));
@@ -215,6 +224,7 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (relayer.indexer && req.method === "GET" && path === "/metrics") return send(200, await memo("metrics", 10_000, () => relayer.indexer.metrics()));
       if (relayer.indexer && req.method === "GET" && path === "/index") return send(200, relayer.indexer.status());
       if (relayer.economy && req.method === "GET" && path === "/economy") return send(200, await relayer.economy.get());
+      if (relayer.x402 && req.method === "GET" && path.startsWith("/paid/report/")) return await relayer.x402.handle(req, res, ctx, corsHeaders);
       if (relayer.humas && req.method === "GET" && path.startsWith("/report/")) {
         return send(200, await relayer.humas.report(decodeURIComponent(path.slice("/report/".length)), new URL(req.url, "http://localhost").searchParams.get("days") ?? undefined, ctx));
       }

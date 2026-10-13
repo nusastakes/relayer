@@ -62,9 +62,10 @@ export const STAFF = {
     name: "Nusastakes Humas",
     description:
       "Public-relations writer for Nusastakes cities: writes the city's weekly report in Indonesian from on-chain events and price snapshots. Read-only; it sends no transactions that move money.",
-    services: (base) => [
+    services: (base, paid = false) => [
       { name: "web", endpoint: `${base}/agents` },
       { name: "report", endpoint: `${base}/report/{city}?days=7` },
+      ...(paid ? [{ name: "x402-report", endpoint: `${base}/paid/report/{city}?days=7` }] : []),
     ],
   },
 };
@@ -73,7 +74,7 @@ export const STAFF = {
  * @param {{publicClient: any, file?: string | null, baseUrl: string, chain?: typeof ERC8004_TESTNET, deployments?: object | null}} options
  * `deployments` (or the JSON `file`) records who registered each agent: { agents: { satpam: { agentId, owner, agentURI, registerTx } } }.
  */
-export function createAgentIdentity({ publicClient, file = null, baseUrl, chain = ERC8004_TESTNET, deployments = null }) {
+export function createAgentIdentity({ publicClient, file = null, baseUrl, chain = ERC8004_TESTNET, deployments = null, x402Agents = [] }) {
   let saved = deployments;
   if (!saved && file) {
     try {
@@ -106,8 +107,8 @@ export function createAgentIdentity({ publicClient, file = null, baseUrl, chain 
         type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
         name: meta.name,
         description: meta.description,
-        services: meta.services(base),
-        x402Support: false,
+        services: meta.services(base, x402Agents.includes(id)),
+        x402Support: x402Agents.includes(id),
         active: true,
         registrations: r?.agentId === undefined ? [] : [{ agentId: Number(r.agentId), agentRegistry }],
         supportedTrust: ["reputation"],

@@ -4,6 +4,8 @@
   "private": true,
   "description": "Relayer gas untuk deposit dengan permit dan keeper APY untuk ApyFeed. Keeper APY sudah ada; relayer deposit masih rencana (lihat README.md).",
   "dependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/evm": "2.28.0",
     "viem": "2.57.4"
   },
   "type": "module",
@@ -16,5 +18,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "@x402/fetch": "2.28.0"
   }
 }

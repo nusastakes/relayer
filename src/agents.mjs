@@ -53,6 +53,7 @@ export function agentList(relayer, guardian = null) {
         description: "Writes the city's weekly report in Indonesian from on-chain events and price snapshots. Read-only: it sends no transactions.",
         reports: "GET /report/:city?days=7",
         erc8004: relayer.identity?.entry("humas") ?? null,
+        x402: relayer.x402?.info() ?? null,
       },
     ],
   };
