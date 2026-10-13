@@ -88,6 +88,8 @@ share dan menarik semuanya lewat `/withdraw`. Penduduk tidak pernah memegang MON
 Untuk menguji relayer yang sudah di-host: `RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/e2e-testnet.mjs`. Walikotanya
 adalah dompet baru tanpa MON yang meminta `/gas-drip` lebih dulu.
 
+Cache peta di instance yang di-host: `RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/map-check.mjs` (tanpa kunci: dompet walikota baru mendapat gas dari `/gas-drip`, mendirikan kota "Map cache test (ignore)" dengan `mapURI` acak, lalu 9 pemeriksaan `PUT`/`GET`/`409`/`403`; mengirim transaksi testnet sungguhan dan meninggalkan satu kota uji di papan peringkat). Pada 13 Okt 2026 semuanya lulus.
+
 Gaya kota di instance yang di-host: `VAULT=0x… DEPLOYER_PRIVATE_KEY=0x… RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/style-check.mjs sakura.7` (kuncinya harus milik walikota kota itu). Pada 13 Okt 2026 uji ini lulus dan kodenya masih ada setelah redeploy.
 
 Hasil 13 Okt 2026 pada deploy ke-2 (kota `0x451b92604f6C1A51adf95b7Ce53a25A9398Ba6c2`): saldo MON penduduk tetap 0 dari
