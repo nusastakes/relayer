@@ -46,7 +46,7 @@
 import http from "node:http";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
-import { createPublicClient, createWalletClient, defineChain, http as viemHttp } from "viem";
+import { createPublicClient, createWalletClient, defineChain, fallback, http as viemHttp } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { HttpError, createMemo, createRateLimiter } from "./guards.mjs";
 import { createRelayer, factoryAbi } from "./relayer.mjs";
@@ -73,6 +73,7 @@ import { loadImpls, sourceIdOf } from "./catalog.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
+  testnetRpcFallbacks: "https://rpc.ankr.com/monad_testnet,https://monad-testnet.drpc.org",
   factory: "0xDC9A322E95E7d9214fA794D39534a15B4aB3d9fF", // CityFactory, contracts/deployments/monad-testnet.json
   faucet: "0xd236c18D274E54FAccC3dd9DDA4b27965a73ee6C", // Agora AUSD testnet faucet
   styleFile: "./data/styles.json",
@@ -102,8 +103,12 @@ export function buildRelayerFromEnv(env = process.env) {
   const rpc = env.MONAD_TESTNET_RPC || DEFAULTS.testnetRpc;
   const chain = defineChain({ id: 10143, name: "Monad Testnet", nativeCurrency: { name: "Monad", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [rpc] } } });
   const account = privateKeyToAccount(key);
-  const publicClient = createPublicClient({ chain, transport: viemHttp(rpc) });
-  const walletClient = createWalletClient({ account, chain, transport: viemHttp(rpc) });
+  // The public testnet RPC drops requests when the indexer, keepers and autopilot run at once; reads and writes fall back to
+  // other public endpoints (MONAD_TESTNET_RPC_FALLBACKS, comma-separated) so a refused request is retried elsewhere.
+  const fallbacks = (env.MONAD_TESTNET_RPC_FALLBACKS ?? DEFAULTS.testnetRpcFallbacks).split(",").map((u) => u.trim()).filter((u) => /^https:\/\//.test(u) && u !== rpc);
+  const transport = () => (fallbacks.length ? fallback([viemHttp(rpc), ...fallbacks.map((u) => viemHttp(u))], { rank: false, retryCount: 2 }) : viemHttp(rpc));
+  const publicClient = createPublicClient({ chain, transport: transport() });
+  const walletClient = createWalletClient({ account, chain, transport: transport() });
   const factory = env.FACTORY_ADDRESS || DEFAULTS.factory;
   const styleFile = env.STYLE_FILE === undefined ? DEFAULTS.styleFile : env.STYLE_FILE;
   const style = styleFile ? createStyleStore({ publicClient, factory, file: styleFile }) : null;
@@ -123,7 +128,7 @@ export function buildRelayerFromEnv(env = process.env) {
     const proposalsFile = env.PROPOSALS_FILE === undefined ? DEFAULTS.proposalsFile : env.PROPOSALS_FILE;
     analyst = createAnalyst({
       publicClient,
-      walletClient: createWalletClient({ account: analystAccount, chain, transport: viemHttp(rpc) }),
+      walletClient: createWalletClient({ account: analystAccount, chain, transport: transport() }),
       store: createPlanStore({ file: proposalsFile || undefined }),
       llm,
       config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian, factory, feed: env.FEED_ADDRESS || DEFAULTS.feed, sourceId: env.APY_SOURCE_ID || DEFAULTS.sourceId, asset: env.AUSD_ADDRESS || DEFAULTS.asset },
@@ -252,7 +257,7 @@ export function buildRelayerFromEnv(env = process.env) {
   const rulesFile = env.RULES_FILE === undefined ? DEFAULTS.rulesFile : env.RULES_FILE;
   built.autopilot = createAutopilot({
     publicClient,
-    walletClient: autopilotAccount ? createWalletClient({ account: autopilotAccount, chain, transport: viemHttp(rpc) }) : null,
+    walletClient: autopilotAccount ? createWalletClient({ account: autopilotAccount, chain, transport: transport() }) : null,
     factory,
     feed,
     tuned: built.tuned,

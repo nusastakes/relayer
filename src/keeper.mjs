@@ -17,7 +17,7 @@
 // written after a market's measurement time.
 
 import { fileURLToPath } from "node:url";
-import { createPublicClient, createWalletClient, defineChain, http, parseAbi } from "viem";
+import { createPublicClient, createWalletClient, defineChain, fallback, http, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { apyFractionToBps, computeApyBps, findBlockAtOrBefore, shouldWrite, MAX_APY_BPS } from "./apy.mjs";
 import { PRIMARY_ID, SEEDS, loadImpls, sharedYields, sourceIdOf } from "./catalog.mjs";
@@ -83,8 +83,11 @@ async function updaterClients(c) {
   if (!key) throw new Error("RELAYER_PRIVATE_KEY is not set");
   const account = privateKeyToAccount(key);
   const testnet = chain(10143, "Monad Testnet", c.testnetRpc);
-  const pub = createPublicClient({ chain: testnet, transport: http(c.testnetRpc) });
-  const wallet = createWalletClient({ account, chain: testnet, transport: http(c.testnetRpc) });
+  // Same fallbacks as the server: the public testnet RPC drops requests under load.
+  const others = (process.env.MONAD_TESTNET_RPC_FALLBACKS ?? "https://rpc.ankr.com/monad_testnet,https://monad-testnet.drpc.org").split(",").map((u) => u.trim()).filter((u) => /^https:\/\//.test(u) && u !== c.testnetRpc);
+  const transport = () => (others.length ? fallback([http(c.testnetRpc), ...others.map((u) => http(u))], { rank: false, retryCount: 2 }) : http(c.testnetRpc));
+  const pub = createPublicClient({ chain: testnet, transport: transport() });
+  const wallet = createWalletClient({ account, chain: testnet, transport: transport() });
   const updater = await pub.readContract({ address: c.feed, abi: feedAbi, functionName: "updater" });
   if (updater.toLowerCase() !== account.address.toLowerCase()) {
     throw new Error(`${account.address} is not the feed updater (${updater}); the owner must call setUpdater first`);
