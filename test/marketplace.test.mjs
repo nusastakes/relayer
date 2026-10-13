@@ -9,7 +9,7 @@ import { ERC8004_TESTNET, createAgentIdentity } from "../src/erc8004.mjs";
 import { agentList } from "../src/agents.mjs";
 import { createHttpServer } from "../src/server.mjs";
 
-const GUARDIAN = "0x1ade0e93f4c10b6d57f2e802b8b4e6167f0f0ea4";
+const GUARDIAN = "0x74f881ec300dfd1bfd26b4c0392f713fc775e7b9";
 const CITY = "0x887AC9965980f680dEbd08A30e2FB33aE99F2397";
 const OWNER = "0x00000000000000000000000000000000000000a1";
 const WALLET = "0x00000000000000000000000000000000000000b2";
@@ -109,7 +109,8 @@ function fixture({ cards = {}, owners = {}, hired = [WALLET], reputation = {}, l
         const all = Object.values(listings).flat();
         if (functionName === "listingIdsOf") return (listings[id] ?? []).map((l) => BigInt(all.indexOf(l)));
         if (functionName === "getListing") return all[id];
-        if (functionName === "statsOf") return { hires: 3n, lastHireAt: 1700000000n, revenue: 750000n };
+        if (functionName === "statsOf") return { hires: 3n, paidHires: 3n, lastHireAt: 1700000000n, revenue: 750000n };
+        if (functionName === "termsHash") return `0x${"ab".repeat(32)}`;
       }
       if (functionName === "ownerOf") { if (!(id in wallets)) throw new Error("ERC721NonexistentToken"); return owners[id] ?? OWNER; }
       if (functionName === "getAgentWallet") return wallets[id];
@@ -254,6 +255,8 @@ test("with a marketplace contract: applying needs an open listing by the owner, 
   assert.deepEqual([entry.pricing.model, entry.pricing.price, entry.pricing.listingId], ["onchain", "250000", "0"]);
   assert.equal(entry.hireVia.function.startsWith("hire("), true);
   assert.equal(entry.hireVia.contract, MARKET);
+  assert.equal(entry.hireVia.expectedTerms, `0x${"ab".repeat(32)}`, "the fingerprint the buyer must pass to hire");
+  assert.equal(entry.hireVia.maxTotal, undefined);
   assert.equal(entry.hireVia.hook, GUARDIAN);
   assert.equal(entry.hireVia.data, "0x000000000000000000000000887ac9965980f680debd08a30e2fb33ae99f2397", "the city address, ABI encoded, ready for the mayor's call");
 });

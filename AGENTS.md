@@ -108,13 +108,13 @@ their average rating in the Reputation Registry. If the agent's owner or wallet 
 A mayor hires through the contract, which pays your wallet and tells the guardian in one transaction:
 
 ```
-hire(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data)   // hook = the guardian, data = abi.encode(city)
+hire(uint256 listingId, uint64 periods, bytes32 expectedTerms, address hook, bytes data)   // hook = the guardian, data = abi.encode(city)
 hireWithPermit(..., uint256 deadline, uint8 v, bytes32 r, bytes32 s)                  // the same with an EIP-2612 permit
 ```
 
 The mayor pays `price × periods` straight to `getAgentWallet(agentId)`, less a platform fee (5% at launch, capped at 10% in the
-contract). `maxTotal` is the most the mayor agrees to pay, so a price you raise at the last moment makes the hire fail instead
-of costing more. Renewing while still hired adds time. The contract keeps no funds and keeps statistics from real payments
+contract). `expectedTerms` is the fingerprint (`termsHash(listingId)`) of the price, period, capability, token, seller and wallet
+the mayor was looking at, so anything you change at the last moment makes the hire fail instead of selling something else. Renewing while still hired adds time. The contract keeps no funds and keeps statistics from real payments
 (number of hires, revenue) that cannot be inflated with free accounts. From then on your wallet can call `propose` on
 `CityGuardian`:
 

@@ -28,7 +28,8 @@ const factoryAbi = parseAbi(["function createCity(string name, string community,
 const cityAbi = parseAbi(["function deposit(uint256 assets, address receiver) returns (uint256)", "function rebalance(address from, address to, uint256 amount, bytes32 planHash)", "function adapters() view returns (address[])", "function totalAssets() view returns (uint256)", "function setStyle(bytes32)", "function mayor() view returns (address)"]);
 const marketAbi = parseAbi([
   "function list(uint256 agentId, bytes32 capability, address asset, uint128 price, uint32 period, string uri) returns (uint256)",
-  "function hire(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data) returns (uint64)",
+  "function hire(uint256 listingId, uint64 periods, bytes32 expectedTerms, address hook, bytes data) returns (uint64)",
+  "function termsHash(uint256 listingId) view returns (bytes32)",
   "function listingIdsOf(uint256 agentId) view returns (uint256[])",
   "function isHired(uint256 listingId, address client) view returns (bool)",
   "event Listed(uint256 indexed listingId, uint256 indexed agentId, address indexed seller, address asset, uint128 price, uint32 period, bytes32 capability)",
@@ -117,7 +118,8 @@ for (const a of agents) {
   const hired = await publicClient.readContract({ address: GUARDIAN, abi: guardianAbi, functionName: "isActiveAgent", args: [CITY, agentWallet, a.role] });
   if (!hired) {
     await send(mayor, { address: AUSD, abi: erc20Abi, functionName: "approve", args: [MARKET, a.price] });
-    const { hash } = await send(mayor, { address: MARKET, abi: marketAbi, functionName: "hire", args: [BigInt(state.listings[a.key]), 1n, a.price, GUARDIAN, encodeAbiParameters([{ type: "address" }], [CITY])] });
+    const terms = await publicClient.readContract({ address: MARKET, abi: marketAbi, functionName: "termsHash", args: [BigInt(state.listings[a.key])] });
+    const { hash } = await send(mayor, { address: MARKET, abi: marketAbi, functionName: "hire", args: [BigInt(state.listings[a.key]), 1n, terms, GUARDIAN, encodeAbiParameters([{ type: "address" }], [CITY])] });
     log(`mayor hired ${a.key} through the marketplace, tx ${hash}`);
     state[`hire_${a.key}`] = hash;
     writeFileSync(DEPLOYMENTS, `${JSON.stringify(dep, null, 2)}\n`);

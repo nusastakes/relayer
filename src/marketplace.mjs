@@ -37,6 +37,7 @@ const marketAbi = parseAbi([
   "function listingIdsOf(uint256 agentId) view returns (uint256[])",
   "function getListing(uint256 listingId) view returns (Listing)",
   "function statsOf(uint256 listingId) view returns (Stats)",
+  "function termsHash(uint256 listingId) view returns (bytes32)",
 ]);
 const MAX_CARD_BYTES = 32 * 1024;
 const FETCH_TIMEOUT_MS = 5_000;
@@ -252,9 +253,10 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
     const ids = await publicClient.readContract({ address: market, abi: marketAbi, functionName: "listingIdsOf", args: [BigInt(agentId)] });
     return Promise.all(
       ids.map(async (id) => {
-        const [l, st] = await Promise.all([
+        const [l, st, terms] = await Promise.all([
           publicClient.readContract({ address: market, abi: marketAbi, functionName: "getListing", args: [id] }),
           publicClient.readContract({ address: market, abi: marketAbi, functionName: "statsOf", args: [id] }),
+          publicClient.readContract({ address: market, abi: marketAbi, functionName: "termsHash", args: [id] }),
         ]);
         const matches = CAPABILITY_BY_ROLE[roleId] === l.capability;
         const current = ownerNow ? getAddress(l.seller) === getAddress(ownerNow) : true;
@@ -264,6 +266,7 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
           price: l.price.toString(),
           period: Number(l.period),
           capability: l.capability,
+          termsHash: terms,
           capabilityMatchesRole: matches,
           active: l.active,
           hireable: l.active && matches && current,
@@ -280,11 +283,13 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
     return {
       via: "marketplace",
       contract: market,
-      function: "hire(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data)",
-      permitFunction: "hireWithPermit(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data, uint256 deadline, uint8 v, bytes32 r, bytes32 s)",
+      function: "hire(uint256 listingId, uint64 periods, bytes32 expectedTerms, address hook, bytes data)",
+      permitFunction: "hireWithPermit(uint256 listingId, uint64 periods, bytes32 expectedTerms, address hook, bytes data, uint256 deadline, uint8 v, bytes32 r, bytes32 s)",
       listingId: offer.listingId,
       periods: 1,
-      maxTotal: offer.price,
+      // A fingerprint of the price, period, capability, token, seller and wallet the buyer is looking at; the hire fails if
+      // the seller changes any of them before it lands. Re-read it (GET /marketplace or termsHash) just before sending.
+      expectedTerms: offer.termsHash,
       hook: guardian,
       data: cityAddress ? encodeAbiParameters([{ type: "address" }], [cityAddress]) : "abi.encode(address city)",
       asset: offer.asset,

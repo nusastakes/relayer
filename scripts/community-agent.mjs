@@ -43,7 +43,8 @@ const guardianAbi = parseAbi([
 const cityAbi = parseAbi(["function adapters() view returns (address[])", "function mayor() view returns (address)"]);
 const marketAbi = parseAbi([
   "function list(uint256 agentId, bytes32 capability, address asset, uint128 price, uint32 period, string uri) returns (uint256)",
-  "function hire(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data) returns (uint64)",
+  "function hire(uint256 listingId, uint64 periods, bytes32 expectedTerms, address hook, bytes data) returns (uint64)",
+  "function termsHash(uint256 listingId) view returns (bytes32)",
   "function listingIdsOf(uint256 agentId) view returns (uint256[])",
   "event Listed(uint256 indexed listingId, uint256 indexed agentId, address indexed seller, address asset, uint128 price, uint32 period, bytes32 capability)",
 ]);
@@ -155,7 +156,8 @@ async function run() {
   if (!hired) {
     await send(mayor, { address: AUSD, abi: erc20Abi, functionName: "approve", args: [MARKET, PRICE] });
     const before = await publicClient.readContract({ address: AUSD, abi: erc20Abi, functionName: "balanceOf", args: [agent.account.address] });
-    const { hash } = await send(mayor, { address: MARKET, abi: marketAbi, functionName: "hire", args: [BigInt(mine.listingId), 1n, PRICE, GUARDIAN, encodeAbiParameters([{ type: "address" }], [CITY])] });
+    const terms = await publicClient.readContract({ address: MARKET, abi: marketAbi, functionName: "termsHash", args: [BigInt(mine.listingId)] });
+    const { hash } = await send(mayor, { address: MARKET, abi: marketAbi, functionName: "hire", args: [BigInt(mine.listingId), 1n, terms, GUARDIAN, encodeAbiParameters([{ type: "address" }], [CITY])] });
     const after = await publicClient.readContract({ address: AUSD, abi: erc20Abi, functionName: "balanceOf", args: [agent.account.address] });
     mine.hireTx = hash;
     save(data);

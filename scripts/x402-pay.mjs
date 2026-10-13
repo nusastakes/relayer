@@ -14,7 +14,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 
 const BASE = (process.env.RELAYER_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
 const FAUCET_BASE = (process.env.FAUCET_URL || BASE).replace(/\/+$/, ""); // set FAUCET_URL when testing a local relayer that has no faucet
-const CITY = process.argv[2] || "0xF7d51c19e5f98b421b041Db0D6b7032f411B4e09"; // the demo city, where Humas is hired
+const CITY = process.argv[2] || "0x35E98BA6f55c65dF272a2ee740025eeB5df85cE6"; // the demo city, where Humas is hired
 const RPC = process.env.MONAD_TESTNET_RPC || "https://testnet-rpc.monad.xyz";
 const AUSD = "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC";
 const chain = defineChain({ id: 10143, name: "Monad Testnet", nativeCurrency: { name: "Monad", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [RPC] } } });

@@ -15,10 +15,10 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { buildRelayerFromEnv, createHttpServer } from "../src/server.mjs";
 
 const RPC = process.env.MONAD_TESTNET_RPC || "https://testnet-rpc.monad.xyz";
-const FACTORY = "0x194C8c5d9B93bA108104652cAD50f938e9205607";
-const MIRROR_IMPL = "0x2B2Eee125Fee62684f4Fa755C05C936b3CA2a60e";
+const FACTORY = "0xDC9A322E95E7d9214fA794D39534a15B4aB3d9fF";
+const MIRROR_IMPL = "0x156fDb80Bd936f1CF1d45A1a167B660A82043080";
 const AUSD = "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC";
-const FEED = "0xFB64e2F4345c55e4c19271AC2E7210BFe6b9a7F0";
+const FEED = "0x3328AEbB57Ee0bc8d2C7f68468dEe6B9b50926b5";
 const SOURCE_ID = "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d";
 const DEPOSIT = 100_000_000n; // 100 AUSD
 const CITY_NAME = "E2E smoke test (ignore)";

@@ -44,7 +44,7 @@ import { createMarketplace } from "./marketplace.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
-  factory: "0x194C8c5d9B93bA108104652cAD50f938e9205607", // CityFactory, contracts/deployments/monad-testnet.json
+  factory: "0xDC9A322E95E7d9214fA794D39534a15B4aB3d9fF", // CityFactory, contracts/deployments/monad-testnet.json
   faucet: "0xd236c18D274E54FAccC3dd9DDA4b27965a73ee6C", // Agora AUSD testnet faucet
   styleFile: "./data/styles.json",
   proposalsFile: "./data/proposals.json",
@@ -53,11 +53,11 @@ const DEFAULTS = {
   erc8004File: "./deployments/erc8004-testnet.json",
   marketplaceFile: "./data/marketplace.json",
   publicUrl: "https://relayer-production-39e1.up.railway.app", // where the ERC-8004 registration files are served
-  factoryDeployBlock: 70658267, // block of the v3 CityFactory deployment, where the indexer starts
-  guardian: "0x1ADE0E93F4C10b6d57F2E802B8B4e6167f0F0ea4", // CityGuardian, contracts/deployments/monad-testnet.json
-  market: "0x19EC26FBC8B00B2a670632BAd5f38120e27166f9", // AgentMarketplace (contracts v3)
-  feed: "0xFB64e2F4345c55e4c19271AC2E7210BFe6b9a7F0", // ApyFeed
-  reserve: "0x50c9de41cE85F5F4c75047B43940fd2718bFd02c", // YieldReserve
+  factoryDeployBlock: 70670656, // block of the v3 CityFactory deployment, where the indexer starts
+  guardian: "0x74F881Ec300DfD1BfD26b4c0392f713fc775E7B9", // CityGuardian, contracts/deployments/monad-testnet.json
+  market: "0x241E3f8f02C53e075794989b9E7BD9832e539D29", // AgentMarketplace (contracts v3)
+  feed: "0x3328AEbB57Ee0bc8d2C7f68468dEe6B9b50926b5", // ApyFeed
+  reserve: "0x40e194d12BC3F6a6b26E8B7808f749c88281Ef96", // YieldReserve
   sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d", // morpho-grove-steakhouse-high-yield-ausd-mainnet
   asset: "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC", // AUSD testnet
 };

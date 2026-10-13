@@ -58,9 +58,9 @@
       "registerTx": "0xf6f1f8f76f5baf438f3ec63f07056cc18da6ea514c7ec98cfa0437dcf88628db",
       "setUriTx": "0x40ba199c73c2a08c4050b291cdfd7ecea516005a912c1d6c3fea97bf07f00a39",
       "listingId": "2",
-      "proposeTx": "0xd08c015b49964b72c146e42f84a2f34367216bd469854981adb3603165561faa",
+      "proposeTx": "0x6be47a32824ff8eabbd7bcb9e86208e70f6745605837cd6387c7079a573c8ace",
       "proposalId": "0",
-      "approveTx": "0x710533b6d6da46e59b426cd79676ba2be38e08bfb3359d8cf682925ba9f6a539"
+      "approveTx": "0x2638139230648fdde35e57f0f1d1dcd5aba6ed6d8ddfcb94cb83144ff41f45e9"
     }
   },
   "communityV2": {
@@ -70,6 +70,15 @@
       "proposeTx": "0xd75b16568fd2746c8b1779438d6d11b5966160f34555216075bbef440540d13c",
       "proposalId": "12",
       "approveTx": "0xa9680a0ebf2a6f9555c8ed6fdde2f02e6cd28326b116b3e32f867064037b4213"
+    }
+  },
+  "communityV3r2": {
+    "note": "Listing, hire, proposal and approval of the example agent on v3 revision 2 (superseded)",
+    "demo": {
+      "listingId": "2",
+      "proposeTx": "0xd08c015b49964b72c146e42f84a2f34367216bd469854981adb3603165561faa",
+      "proposalId": "0",
+      "approveTx": "0x710533b6d6da46e59b426cd79676ba2be38e08bfb3359d8cf682925ba9f6a539"
     }
   }
 }
