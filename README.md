@@ -2,8 +2,10 @@
 
 Relayer gas dan keeper APY untuk **Nusastakes** (game kota di Monad: setiap kota adalah vault ERC-4626).
 
-> **Status:** keduanya sudah ada dan diuji di Monad testnet. Relayer membayar gas setor dan tarik penduduk lewat
-> `permit`; keeper menulis APY vault AUSD mainnet ke kontrak `ApyFeed`. Berjalan di Railway: https://relayer-production-39e1.up.railway.app (testnet).
+> **Status:** berjalan di Railway (testnet): https://relayer-production-39e1.up.railway.app, dipakai frontend
+> https://nusastakes.vercel.app. Relayer membayar gas setor dan tarik penduduk lewat `permit`; keeper menulis APY 18
+> layanan katalog dan APY efektif tiap adapter bersetelan ke `ApyFeed`; pencatat memberi riwayat kota (`/history`) dan
+> skor kota (`/score`); autopilot menjalankan aturan yang ditandatangani walikota. `npm test`: 229 lulus (14 Okt 2026).
 
 ## Relayer deposit (`src/server.mjs`)
 
@@ -36,6 +38,7 @@ tangan permit), siapa pun pengirimnya.
 | `GET /economy` | | laporan ekonomi (R13): fee per sektor Monad dari DefiLlama untuk 24 jam, 7 hari, dan 30 hari, lengkap dengan sumber, URL, dan waktu pengambilan; di-cache 10 menit, dan memakai data lama (`stale: true`) bila DefiLlama tidak terjangkau |
 | `GET /history/:city?days=7` | | riwayat kota 1 sampai 30 hari dari pencatat, terbaru di depan: `{ city, name, mayor, days, from, to, truncated, totals, services, markets, tokens, events }`. `totals` (satuan dasar AUSD, 6 desimal, sebagai string): `traffic` = setor + tarik + volume layanan + bayaran sewa staf (`outsideTraffic` dan `uniqueUsers` tanpa alamat walikota), `deposits`, `withdrawals`, `netFlow`, `serviceVolume`, `serviceFees` (fee yang diperoleh kota), `feesReleased` (fee yang sudah dialirkan ke vault), `serviceUses`, `rebalanceVolume`, `rebalanceCount` (dihitung terpisah, bukan lalu lintas), `hires`, `hirePayments`. Jenis event: `deposit`, `withdraw`, `rebalance`, `hire`, `launch`, `trade`, `predict`, `service`, `service-set`, `market-open`, `market-resolved`, `claim`, `fees-released`, `fee`, `evacuate`, `reveal`. 404 bila pencatat belum mengenal kota itu |
 | `GET /catalog` | | katalog layanan: 18 layanan protokol Monad (`id`, `name`, `protocol`, `category`, `asset`, `pool`, `sourceId` = keccak256 id pool DefiLlama, `impl` implementasi adapter atau `null` bila belum bisa dipilih, `apyBps`, `tvlUsd`, `observedAt`, `source`, `feed` = nilai di `ApyFeed`, `feedClamped` bila APY di atas batas feed 50%) dan `kinds` (layanan non-imbal-hasil `CityServices`: 1 peluncur token, 2 pasar prediksi, dengan alamat kontraknya). DefiLlama Yields di-cache 15 menit; layanan utama (Morpho Grove x Steakhouse) memakai APY dari `ApyFeed` dan TVL `totalAssets` vault mainnet |
+| `GET /score/:city` | | skor kota 0 sampai 100 dari layanannya sendiri (`src/score.mjs`): `{ score, stage (empty/village/town/city/metropolis), crowd, variety: { kinds, of: 6 }, activeServices, economy, levels: { wealth, income, traffic }, inputs, formula }`. Jenis layanan: bank, brankas, staking, pasar (adapter yang memegang dana; kategori dari `baseSourceId` atau `sourceId`), launchpad (loket menyala), staf (disewa 30 hari terakhir). Ekonomi = 0,45 kekayaan + 0,25 penghasilan 7 hari + 0,30 lalu lintas luar 7 hari, skala log; skor = 90 × ekonomi × (0,5 + 0,5 × jenis/6) + min(10, 2 × layanan aktif); `crowd` = min(lalu lintas, kekayaan), jadi kota ramai tetapi miskin tidak tampak ramai. Bobot dan acuan adalah parameter permainan, bukan hasil ukur |
 | `GET /services` | | tindakan terbaru penyelesai pasar prediksi dan pengalir fee layanan (`RESOLVER=1`, `RELEASER=1`) |
 | `GET /report/:city?days=7` | | laporan Humas dalam bahasa Indonesia (1 sampai 30 hari) dari event on-chain dan snapshot harga; hanya untuk kota yang walikotanya memberi Humas (`0x8Df168681FE3EF206D8a3fE8eC0C003A776aD498`) peran `HUMAS` (3), jika tidak `status: not-hired` |
 | `GET /analyst` | | `{ address, role: 2, roleName: "ANALIS", guardian, llm }`: alamat bot Analis (`0xDFef53a0d68fd0481c5d4b3D708F3Ed2e6313B1e`), yang harus diberi peran `ANALIS` oleh walikota |
@@ -52,7 +55,7 @@ relayer tidak cukup. Pembatas laju per IP: setor dan tarik 30 per menit, faucet 
 
 ```
 npm install
-npm test                         # 138 tes unit (validasi, pembatas laju, antrean, logika dengan klien palsu, gaya kota, Analis)
+npm test                         # 229 tes unit (validasi, pembatas laju, antrean, riwayat, skor, setelan, aturan, gaya kota, Analis)
 RELAYER_PRIVATE_KEY=0x… npm start   # server di :8787; HTTP, dan keeper bila RUN_KEEPER=1 (src/main.mjs)
 ```
 
@@ -63,15 +66,17 @@ proxy), `RUN_KEEPER=1` (jalankan keeper APY dalam proses yang sama), `KEEPER_INT
 tiap interval, `PROPOSALS_FILE` (bawaan `./data/proposals.json`), `BOOK_FILE` (bawaan `./data/book.json`, kosongkan untuk mematikan `/book`), `TRUST_PROXY_HOPS` (jumlah proxy tepercaya di depan relayer; **di Railway 2**, lihat bagian keamanan), `RUN_INDEXER=1` (menjalankan pencatat), `INDEX_FILE` (bawaan `./data/index.json`), `INDEX_RANGE` (blok per permintaan `getLogs`, bawaan 100), `INDEX_START_BLOCK` (bawaan blok deploy factory v2, 70461935), `INDEXER=0` / `ECONOMY=0` untuk mematikan, `HUMAS_ADDRESS` (menyalakan Humas), `ANTHROPIC_API_KEY` dan/atau `XKIRO_API_KEY` (opsional; Sonnet menulis alasan usulan, Anthropic dicoba lebih dulu lalu gateway xKiro
 dengan model `anthropic/claude-sonnet-5` atau `XKIRO_MODEL`; `ANALYST_LLM=0` mengabaikannya), `STYLE_FILE` (berkas JSON
 tempat gaya kota disimpan, bawaan `./data/styles.json`; isi dengan jalur di volume agar bertahan lintas deploy, kosongkan untuk
-mematikan `/style`), `MAPS_DIR` (folder cache peta kota, satu berkas per peta ditambah `index.json`; bawaan `./data/maps`, Railway `/data/maps`, kosongkan untuk mematikan `/map`), `MIRROR_ADAPTER_IMPL` (nilai `mirrorAdapterImpl` di `/config`).
+mematikan `/style`), `MAPS_DIR` (folder cache peta kota, satu berkas per peta ditambah `index.json`; bawaan `./data/maps`, Railway `/data/maps`, kosongkan untuk mematikan `/map`), `MIRROR_ADAPTER_IMPL` (nilai `mirrorAdapterImpl` di `/config`), `MONAD_TESTNET_RPC_FALLBACKS` (RPC cadangan dipisah koma; bawaan ankr dan drpc, karena RPC publik testnet menolak permintaan saat pencatat, keeper, dan autopilot berjalan bersamaan), `CITY_SERVICES` dan `CITY_SERVICES_FROM_BLOCK`, `RELEASER=1`, `RESOLVER=1`, `AUTOPILOT_PRIVATE_KEY`, `RUN_AUTOPILOT=1`, `RULES_FILE` (lihat bagian setelan dan aturan).
 
 ### Hosting di Railway
 
 Terpasang di proyek `nusastakes-relayer`, layanan `relayer`, lingkungan `production`: **https://relayer-production-39e1.up.railway.app**. Satu layanan
 (HTTP + keeper APY). `railway.json` menyiapkan perintah mulai (`npm start`), health check (`/health`), dan kebijakan
-restart. Variabel di Railway: `RELAYER_PRIVATE_KEY` (rahasia, diisi lewat stdin, tidak ada di repo), `RUN_KEEPER=1`,
-`TRUST_PROXY=1`, `NODE_ENV=production`, dan `ALLOWED_ORIGIN` (origin frontend dipisah koma; saat ini
-`http://localhost:3000,http://localhost:3100`), dan `STYLE_FILE=/data/styles.json` di volume `relayer-volume` yang dipasang di `/data`
+restart. Variabel di Railway: `RELAYER_PRIVATE_KEY` dan `AUTOPILOT_PRIVATE_KEY` (rahasia, tidak ada di repo), `RUN_KEEPER=1`,
+`RUN_AUTOPILOT=1`, `RELEASER=1`, `CITY_SERVICES=0x9d156f5fdfa87925AF7c574f0791d804FFC9B4e1`,
+`CITY_SERVICES_FROM_BLOCK=70750613`, `RULES_FILE=/data/rules.json`, `TRUST_PROXY=1`, `NODE_ENV=production`, dan
+`ALLOWED_ORIGIN` (origin frontend dipisah koma; saat ini `http://localhost:3000,http://localhost:3100,https://nusastakes.vercel.app`),
+dan `STYLE_FILE=/data/styles.json` di volume `relayer-volume` yang dipasang di `/data`
 (`railway volume --service <ID layanan> add --mount-path /data`; nama layanan membuat CLI panic, pakai ID); `PORT` diisi Railway. Dompet relayer hanya memegang MON testnet dan perlu diisi ulang bila
 habis (cek `GET /health`). Jalankan satu instance saja (batas laju di memori, satu pengirim nonce).
 
@@ -141,7 +146,9 @@ Walikota menyetel tiap layanan sebatas hak penyetor di protokol aslinya, dan men
 | `GET /rules/:city/preview` | uji kering: `{ vault, state, actions }` (tidak ada yang dikirim) |
 | `PUT /rules/:city` | `{ vault, rulesJson, nonce, signature }` → `{ vault, rules, nonce, rulesHash }` |
 
-`GET /catalog` sekarang memberi `impl` (yang dipakai kota BARU: implementasi bersetelan bila ada), `plainImpl`, `tunedImpl`, `knobs` (`rewards`, `loop`, `range`) atau `knobsNote` bila protokol tidak memberi setelan bagi penyetor. `GET /config` memberi `tunedImpls` dan `autopilot`.
+`GET /catalog` sekarang memberi `impl` (yang dipakai kota BARU: implementasi bersetelan bila ada), `plainImpl`, `tunedImpl`, `knobs` (`rewards`, `loop`, `range`) atau `knobsNote` bila protokol tidak memberi setelan bagi penyetor. `GET /config` memberi `tunedImpls` dan `autopilot` (alamat autopilot di Railway: `0x33157c09bE56632449bA3f7e2B6F4eA138fe17D1`).
+
+**Bukti di testnet (14 Okt 2026).** Kota uji `0x924A004D0ea38C8AEB4704A1FD241778d6CE7657` dengan tiga layanan bersetelan: keeper menulis APY efektif ke kunci masing-masing adapter dalam satu sampai dua menit setelah `setTuning` (Neverland looping 2× = 1147 bps, Uniswap v3 ±10% = 5000 bps dengan `uncappedApyBps` 41501, Aave tanpa hadiah = 337 bps). Walikota menandatangani aturan `chase-apy` (EIP-712 `CityRules`) dan menjadikan autopilot session key; pada putaran berikutnya autopilot memindah 100 AUSD dari Aave ke Uniswap (tx `0x5e61d4c8c2347d8ea7c765692b204592dfd0de440a2726e906e0d3a3b94aba42`, pengirim = autopilot, status sukses). Di situs produksi, akun passkey baru menyimpan aturan yang sama lewat UI.
 
 ## Buku strategi tersegel (`src/book.mjs`) dan daftar staf (`src/agents.mjs`)
 
@@ -226,7 +233,8 @@ Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`,
 
 ## Penggunaan alat AI
 
-Dibuat dengan Claude Code (Claude Opus untuk rencana dan pemeriksaan, Claude Sonnet untuk pengerjaan). Keluaran AI
+Dibuat dengan Claude Code (sampai 13 Okt: Claude Opus untuk rencana dan pemeriksaan, Claude Sonnet untuk pengerjaan; mulai
+14 Okt riwayat kota, katalog, skor, mesin setelan, aturan, dan autopilot dikerjakan Claude Opus). Keluaran AI
 diperiksa pengembang; yang belum diuji ditulis "belum diuji". LLM tidak pernah memindahkan dana di luar aturan
 deterministik kontrak.
 
