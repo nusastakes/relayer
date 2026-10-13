@@ -1,0 +1,54 @@
+{
+  "chainId": 10143,
+  "identityRegistry": "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+  "reputationRegistry": "0x8004B663056A597Dffe9eCcC1965A193B7388713",
+  "agents": {
+    "satpam": {
+      "agentId": "2230",
+      "owner": "0x16f8D0624a4D440D2b8DeC37871CB4b8801d72E7",
+      "agentURI": "https://relayer-production-39e1.up.railway.app/agents/satpam/card.json",
+      "registerTx": "0xf9884bfd95b0cf0e5c0bdccdc058ee4994a69cd34dd8c7601d6db19f34f86ce7"
+    },
+    "analis": {
+      "agentId": "2231",
+      "owner": "0xDFef53a0d68fd0481c5d4b3D708F3Ed2e6313B1e",
+      "agentURI": "https://relayer-production-39e1.up.railway.app/agents/analis/card.json",
+      "registerTx": "0x90605daba456a4df84c8e94ce733eb8b48960aa70ffaeef34a701fa782102e89"
+    },
+    "humas": {
+      "agentId": "2232",
+      "owner": "0x8Df168681FE3EF206D8a3fE8eC0C003A776aD498",
+      "agentURI": "https://relayer-production-39e1.up.railway.app/agents/humas/card.json",
+      "registerTx": "0xa1cfee2581aac25bf4114bfe039a2bd9b1af3c389ec0072db713a16e5f019506"
+    }
+  },
+  "feedback": [
+    {
+      "agent": "satpam",
+      "from": "0x6A9D40CA892972d6E6cf1dDF21Ea20F2bF3c1002",
+      "value": 100,
+      "tag1": "evacuation",
+      "tag2": "demo-seed",
+      "feedbackURI": "https://testnet.monadvision.com/tx/0x10749bb7f363aaeae6461b6d3f31175921148f79da323baa478c3251a6332cca",
+      "tx": "0x3e1ae5c2bd2e5bafa19d341cb1b0f81033fe6edb658e2ca8c0eeb7957511c243"
+    },
+    {
+      "agent": "analis",
+      "from": "0x6A9D40CA892972d6E6cf1dDF21Ea20F2bF3c1002",
+      "value": 90,
+      "tag1": "proposal-quality",
+      "tag2": "demo-seed",
+      "feedbackURI": "https://relayer-production-39e1.up.railway.app/proposals/0x887AC9965980f680dEbd08A30e2FB33aE99F2397",
+      "tx": "0x2ffc8e035938a40db4dc54756bd0191ad327b80731571a42e2d1f87256f5fe48"
+    },
+    {
+      "agent": "humas",
+      "from": "0x6A9D40CA892972d6E6cf1dDF21Ea20F2bF3c1002",
+      "value": 85,
+      "tag1": "report-quality",
+      "tag2": "demo-seed",
+      "feedbackURI": "https://relayer-production-39e1.up.railway.app/report/0x887AC9965980f680dEbd08A30e2FB33aE99F2397?days=7",
+      "tx": "0xf79b7fd65ac965f6258aafd5f1d7f377bcc2f58420b85472d58958ec730bea50"
+    }
+  ]
+}

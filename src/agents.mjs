@@ -13,6 +13,7 @@ export function agentList(relayer, guardian = null) {
   const analyst = relayer.analyst ?? null;
   return {
     guardian,
+    erc8004: relayer.identity?.registry ?? null,
     hire: "CityGuardian.grantAgent(city, agent, role, expiry) by the mayor; revokeAgent(city, agent) to fire; isActiveAgent(city, agent, role) to check",
     agents: [
       {
@@ -25,6 +26,7 @@ export function agentList(relayer, guardian = null) {
         status: "simulated",
         description: "Watches the city and the source vault; when risk is HIGH it asks the guardian to pull an adapter's money back to idle. Can only evacuate to idle.",
         source: "https://github.com/nusastakes/cre-guardian",
+        erc8004: relayer.identity?.entry("satpam") ?? null,
       },
       {
         id: "analis",
@@ -37,6 +39,7 @@ export function agentList(relayer, guardian = null) {
         llm: analyst ? analyst.info().llmProviders : [],
         description: "Proposes moving idle cash into the yield adapter (or back) with a plain-language reason; nothing moves until the mayor approves.",
         proposals: "GET /proposals/:city",
+        erc8004: relayer.identity?.entry("analis") ?? null,
       },
       {
         id: "humas",
@@ -49,6 +52,7 @@ export function agentList(relayer, guardian = null) {
         llm: relayer.humas ? relayer.humas.info().llmProviders : [],
         description: "Writes the city's weekly report in Indonesian from on-chain events and price snapshots. Read-only: it sends no transactions.",
         reports: "GET /report/:city?days=7",
+        erc8004: relayer.identity?.entry("humas") ?? null,
       },
     ],
   };

@@ -38,6 +38,7 @@ import { createHumas } from "./humas.mjs";
 import { createIndexer } from "./indexer.mjs";
 import { agentList } from "./agents.mjs";
 import { createAnalyst, createPlanStore } from "./analyst.mjs";
+import { createAgentIdentity } from "./erc8004.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
@@ -47,6 +48,8 @@ const DEFAULTS = {
   proposalsFile: "./data/proposals.json",
   bookFile: "./data/book.json",
   indexFile: "./data/index.json",
+  erc8004File: "./deployments/erc8004-testnet.json",
+  publicUrl: "https://relayer-production-39e1.up.railway.app", // where the ERC-8004 registration files are served
   factoryDeployBlock: 70461935, // block of the v2 CityFactory deployment, where the indexer starts
   guardian: "0x083899bEE8138E5f951db568926393FDb1F418A2", // CityGuardian, contracts/deployments/monad-testnet.json
   feed: "0x707A675DDc976B0E9C6B520Dbd0326204F30d540", // ApyFeed
@@ -105,6 +108,8 @@ export function buildRelayerFromEnv(env = process.env) {
     env.HUMAS_ADDRESS && indexer
       ? createHumas({ publicClient, indexer, address: env.HUMAS_ADDRESS, llm, analystStore: analyst?.store ?? null, bookStore: book, config: { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian } })
       : null;
+  // ERC-8004 identity of the staff (testnet registries). Off with ERC8004=0; agents show as unregistered if the file is missing.
+  const identity = env.ERC8004 === "0" ? null : createAgentIdentity({ publicClient, file: env.ERC8004_FILE === undefined ? DEFAULTS.erc8004File : env.ERC8004_FILE || null, baseUrl: env.PUBLIC_URL || DEFAULTS.publicUrl });
   return createRelayer({
     publicClient,
     walletClient,
@@ -114,6 +119,7 @@ export function buildRelayerFromEnv(env = process.env) {
     indexer,
     humas,
     economy,
+    identity,
     config: {
       factory,
       faucet: env.AUSD_FAUCET === undefined ? DEFAULTS.faucet : env.AUSD_FAUCET || null,
@@ -212,7 +218,21 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (relayer.humas && req.method === "GET" && path.startsWith("/report/")) {
         return send(200, await relayer.humas.report(decodeURIComponent(path.slice("/report/".length)), new URL(req.url, "http://localhost").searchParams.get("days") ?? undefined, ctx));
       }
-      if (req.method === "GET" && path === "/agents") return send(200, agentList(relayer, relayer.analyst?.config?.guardian ?? DEFAULTS.guardian));
+      if (relayer.identity && req.method === "GET" && /^\/agents\/[a-z]+\/card\.json$/.test(path)) {
+        const card = relayer.identity.card(path.split("/")[2]);
+        if (!card) throw new HttpError(404, "no such agent");
+        return send(200, card);
+      }
+      if (req.method === "GET" && path === "/agents") {
+        const list = agentList(relayer, relayer.analyst?.config?.guardian ?? DEFAULTS.guardian);
+        if (!relayer.identity) return send(200, list);
+        // Reputation is read from the chain and cached, and a failed read only hides the numbers, never the list.
+        const reputation = await memo("agent-reputation", 30_000, async () => {
+          const rows = await Promise.all(list.agents.map(async (a) => [a.id, a.erc8004 ? await relayer.identity.reputation(a.erc8004.agentId).catch(() => null) : null]));
+          return Object.fromEntries(rows);
+        });
+        return send(200, { ...list, agents: list.agents.map((a) => (a.erc8004 ? { ...a, erc8004: { ...a.erc8004, reputation: reputation[a.id] ?? null } } : a)) });
+      }
       if (relayer.book && (req.method === "PUT" || req.method === "POST") && path === "/book") return send(200, await relayer.book.put(await readJson(req, 40_000), ctx));
       if (relayer.book && req.method === "GET" && path.startsWith("/book/")) {
         const [owner, id, ...rest] = path.slice("/book/".length).split("/").map(decodeURIComponent);
