@@ -24,15 +24,17 @@ if (process.env.RUN_KEEPER === "1") {
   const intervalSec = Number(process.env.KEEPER_INTERVAL_SEC || 3600);
   const options = parseArgs(["--window-days", String(process.env.KEEPER_WINDOW_DAYS || 3)]);
   const tick = async () => {
+    let delaySec = intervalSec;
     try {
       await step(options);
     } catch (e) {
       console.error(`keeper step failed: ${e.shortMessage || e.message}`);
+      delaySec = Math.min(intervalSec, 90); // the public RPC drops requests now and then: try again soon, not in an hour
     }
-    keeperTimer = setTimeout(tick, intervalSec * 1000);
+    keeperTimer = setTimeout(tick, delaySec * 1000);
   };
   console.log(`keeper enabled, every ${intervalSec}s`);
-  tick();
+  keeperTimer = setTimeout(tick, 8_000);
 }
 
 let indexerTimer;
@@ -67,7 +69,7 @@ if (process.env.RUN_ANALYST === "1" && relayer.analyst) {
     analystTimer = setTimeout(tick, intervalSec * 1000);
   };
   console.log(`analyst ${relayer.analyst.address} enabled, every ${intervalSec}s`);
-  tick();
+  analystTimer = setTimeout(tick, 25_000); // staggered: the indexer catches up first, then the keeper, analyst and watchdog
 }
 
 let watchdogTimer;
@@ -83,7 +85,7 @@ if (process.env.RUN_WATCHDOG === "1" && relayer.watchdog) {
     watchdogTimer = setTimeout(tick, intervalSec * 1000);
   };
   console.log(`watchdog enabled, every ${intervalSec}s`);
-  tick();
+  watchdogTimer = setTimeout(tick, 45_000);
 }
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
