@@ -31,6 +31,7 @@ const UINT = /^[0-9]{1,30}$/;
 
 const factoryAbi = parseAbi(["function isCity(address) view returns (bool)"]);
 const vaultAbi = parseAbi(["function mayor() view returns (address)"]);
+const styleAbi = parseAbi(["function style() view returns (bytes32)"]);
 
 function vaultAddress(value) {
   if (typeof value !== "string" || !ADDRESS.test(value)) throw new HttpError(400, "vault must be a 20-byte hex address");
@@ -92,6 +93,24 @@ export function createStyleStore({ publicClient, factory, file, now = () => Date
       const vault = vaultAddress(rawVault);
       const entry = entries.get(vault.toLowerCase());
       return { code: entry?.code ?? "", nonce: entry?.nonce ?? "0" };
+    },
+
+    /**
+     * GET /style/:vault, with the code the mayor stored on-chain (`CityVault.setStyle`, contracts v3) when there is one. The
+     * on-chain value is the better source of truth; the signed JSON entry is the fallback for cities without it.
+     */
+    async getWithChain(rawVault) {
+      const vault = vaultAddress(rawVault);
+      const stored = this.get(vault);
+      let onchain = null;
+      try {
+        const raw = await publicClient.readContract({ address: vault, abi: styleAbi, functionName: "style" });
+        const text = Buffer.from(raw.slice(2), "hex").toString("utf8").replace(/\0+$/, "");
+        onchain = CODE.test(text) ? text : null;
+      } catch {
+        onchain = null; // a v2 vault has no style(), or the read failed
+      }
+      return { ...stored, onchain };
     },
 
     /** POST /style: accepted only when the signature comes from the city's mayor and the nonce is newer. */

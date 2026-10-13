@@ -44,7 +44,7 @@ export const guardianAbi = parseAbi([
   "function proposals(uint256 id) view returns ((address city, address from, address to, uint256 amount, bytes32 planHash, address proposer, uint64 createdAt, bool approved))",
   "event ProposalCreated(uint256 indexed id, address indexed city, address indexed proposer, address from, address to, uint256 amount, bytes32 planHash)",
 ]);
-const vaultAbi = parseAbi(["function totalAssets() view returns (uint256)", "function adapters() view returns (address[])", "function maxShiftBps() view returns (uint16)"]);
+const vaultAbi = parseAbi(["function totalAssets() view returns (uint256)", "function adapters() view returns (address[])", "function maxShiftBps() view returns (uint16)", "function quarantinedCount() view returns (uint256)"]);
 const adapterAbi = parseAbi(["function totalAssets() view returns (uint256)", "function isSimulated() view returns (bool)"]);
 const tokenAbi = parseAbi(["function balanceOf(address) view returns (uint256)"]);
 const feedAbi = parseAbi(["function latest(bytes32 sourceId) view returns (uint32 apyBps, uint64 observedAt, uint64 updatedAt)"]);
@@ -294,6 +294,9 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
 
   async function takeSnapshot(city) {
     const read = (address, abi, functionName, args) => publicClient.readContract({ address, abi, functionName, args });
+    // A city with a quarantined adapter is in withdraw-only mode (contracts v3): nothing may be moved into the broken adapter.
+    const quarantined = Number(await read(city, vaultAbi, "quarantinedCount").catch(() => 0n));
+    if (quarantined > 0) return { quarantined };
     const [total, adapterList, maxShiftBps, idle, feed] = await Promise.all([
       read(city, vaultAbi, "totalAssets"),
       read(city, vaultAbi, "adapters"),
@@ -347,6 +350,7 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
 
     const snapshot = await takeSnapshot(city);
     if (snapshot === null) return { city, status: "not-a-city" };
+    if (snapshot.quarantined) return { city, status: "quarantined", why: `${snapshot.quarantined} adapter(s) in quarantine; proposals are paused` };
     const decision = decide(snapshot, c.params);
     if (decision.action === "none") return { city, status: "nothing-to-do", why: decision.why };
 

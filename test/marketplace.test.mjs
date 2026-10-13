@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { COMMUNITY_ROLES, MAX_LISTED, cleanText, createMarketplace, fetchCard, isPublicIp, validateCard } from "../src/marketplace.mjs";
+import { CAPABILITY_BY_ROLE, COMMUNITY_ROLES, MAX_LISTED, cleanText, createMarketplace, fetchCard, isPublicIp, validateCard } from "../src/marketplace.mjs";
 import { ERC8004_TESTNET, createAgentIdentity } from "../src/erc8004.mjs";
 import { agentList } from "../src/agents.mjs";
 import { createHttpServer } from "../src/server.mjs";
@@ -96,12 +96,21 @@ test("validateCard: accepts the documented shape and rejects everything that wou
 });
 
 /** A chain with agents 9 (analyst) and 10 (humas) in the registry, and a mayor who hired agent 9's wallet in CITY. */
-function fixture({ cards = {}, owners = {}, hired = [WALLET], reputation = {} } = {}) {
+const MARKET = "0x00000000000000000000000000000000000ba5e1";
+const listingOf = (over = {}) => ({ agentId: 9n, seller: OWNER, asset: "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC", price: 250000n, period: 604800, capability: CAPABILITY_BY_ROLE[2], active: true, uri: "", ...over });
+
+function fixture({ cards = {}, owners = {}, hired = [WALLET], reputation = {}, listings = {} } = {}) {
   const wallets = { 9: WALLET, 10: "0x00000000000000000000000000000000000000c3", 11: "0x0000000000000000000000000000000000000000" };
   const uris = { 9: dataUri(goodCard(9)), 10: dataUri(goodCard(10, { nusastakes: { capability: "nusastakes.city-staff", roleId: 3, pricing: { model: "x402", amount: "$0.01" } } })), 11: dataUri(goodCard(11)), ...cards };
   const publicClient = {
-    async readContract({ functionName, args }) {
+    async readContract({ functionName, args, address }) {
       const id = args?.[0] !== undefined && typeof args[0] === "bigint" ? Number(args[0]) : null;
+      if (address === MARKET) {
+        const all = Object.values(listings).flat();
+        if (functionName === "listingIdsOf") return (listings[id] ?? []).map((l) => BigInt(all.indexOf(l)));
+        if (functionName === "getListing") return all[id];
+        if (functionName === "statsOf") return { hires: 3n, lastHireAt: 1700000000n, revenue: 750000n };
+      }
       if (functionName === "ownerOf") { if (!(id in wallets)) throw new Error("ERC721NonexistentToken"); return owners[id] ?? OWNER; }
       if (functionName === "getAgentWallet") return wallets[id];
       if (functionName === "tokenURI") return uris[id];
@@ -229,4 +238,44 @@ test("HTTP: GET /marketplace and POST /marketplace/apply, with the JSON content 
   } finally {
     bare.close();
   }
+});
+
+test("with a marketplace contract: applying needs an open listing by the owner, and the listing shows price, stats and the hire call", async () => {
+  const fx = fixture({ listings: { 9: [listingOf()] } });
+  const m = build(fx, { market: MARKET, ipLimit: 1000, globalLimit: 1000 });
+  const applied = await m.apply({ agentId: 9 }, {});
+  assert.equal(applied.listed, true);
+
+  const list = await m.list({ city: CITY });
+  assert.equal(list.marketplace, MARKET);
+  const entry = list.agents.find((a) => a.id === "erc8004:9");
+  assert.equal(entry.offers.length, 1);
+  assert.deepEqual([entry.offers[0].price, entry.offers[0].period, entry.offers[0].hires, entry.offers[0].hireable], ["250000", 604800, 3, true]);
+  assert.deepEqual([entry.pricing.model, entry.pricing.price, entry.pricing.listingId], ["onchain", "250000", "0"]);
+  assert.equal(entry.hireVia.function.startsWith("hire("), true);
+  assert.equal(entry.hireVia.contract, MARKET);
+  assert.equal(entry.hireVia.hook, GUARDIAN);
+  assert.equal(entry.hireVia.data, "0x000000000000000000000000887ac9965980f680debd08a30e2fb33ae99f2397", "the city address, ABI encoded, ready for the mayor's call");
+});
+
+test("with a marketplace contract: no listing, a closed listing, the wrong capability or someone else's listing are all refused", async () => {
+  const ip = { ip: "9.9.9.9" };
+  const none = build(fixture({ listings: {} }), { market: MARKET, ipLimit: 1000, globalLimit: 1000 });
+  await assert.rejects(() => none.apply({ agentId: 9 }, ip), /list this agent on the AgentMarketplace contract first/);
+  for (const bad of [{ active: false }, { capability: CAPABILITY_BY_ROLE[3] }, { seller: "0x00000000000000000000000000000000000000f9" }]) {
+    const m = build(fixture({ listings: { 9: [listingOf(bad)] } }), { market: MARKET, ipLimit: 1000, globalLimit: 1000 });
+    await assert.rejects(() => m.apply({ agentId: 9 }, ip), /list this agent on the AgentMarketplace contract first/, JSON.stringify(Object.keys(bad)));
+  }
+});
+
+test("with a marketplace contract: a listing that went stale after the application is shown but not hireable", async () => {
+  const listings = { 9: [listingOf()] };
+  const fx = fixture({ listings });
+  const m = build(fx, { market: MARKET, ipLimit: 1000, globalLimit: 1000 });
+  await m.apply({ agentId: 9 }, {});
+  listings[9][0].seller = "0x00000000000000000000000000000000000000f9";
+  const entry = (await m.list()).agents.find((a) => a.id === "erc8004:9");
+  assert.equal(entry.offers[0].hireable, false);
+  assert.equal(entry.hireVia, undefined);
+  assert.equal(entry.pricing.model, "free", "no live price is promised for a stale listing");
 });

@@ -55,7 +55,9 @@ const DEFAULTS = {
   publicUrl: "https://relayer-production-39e1.up.railway.app", // where the ERC-8004 registration files are served
   factoryDeployBlock: 70461935, // block of the v2 CityFactory deployment, where the indexer starts
   guardian: "0x083899bEE8138E5f951db568926393FDb1F418A2", // CityGuardian, contracts/deployments/monad-testnet.json
+  market: null, // AgentMarketplace (contracts v3); set by MARKETPLACE_ADDRESS
   feed: "0x707A675DDc976B0E9C6B520Dbd0326204F30d540", // ApyFeed
+  reserve: "0x18B15f540E231Fb75F9c86a080a69c3D0FAB27C1", // YieldReserve
   sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d", // morpho-grove-steakhouse-high-yield-ausd-mainnet
   asset: "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC", // AUSD testnet
 };
@@ -125,6 +127,7 @@ export function buildRelayerFromEnv(env = process.env) {
           publicClient,
           identity,
           guardian: guardianAddress,
+          market: env.MARKETPLACE_ADDRESS || DEFAULTS.market,
           teamAgents: () => agentList(built, guardianAddress).agents,
           isCity: (address) => publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "isCity", args: [address] }),
           file: marketplaceFile || null,
@@ -134,6 +137,19 @@ export function buildRelayerFromEnv(env = process.env) {
     publicClient,
     walletClient,
     marketplace,
+    contracts: {
+      chainId: 10143,
+      version: env.CONTRACTS_VERSION || "v2",
+      factory,
+      guardian: guardianAddress,
+      feed: env.FEED_ADDRESS || env.APY_FEED_ADDRESS || DEFAULTS.feed,
+      reserve: env.YIELD_RESERVE_ADDRESS || DEFAULTS.reserve || null,
+      marketplace: env.MARKETPLACE_ADDRESS || DEFAULTS.market,
+      asset: DEFAULTS.asset,
+      identityRegistry: identity?.registry.identity ?? null,
+      reputationRegistry: identity?.registry.reputation ?? null,
+      deployBlock: Number(env.FACTORY_DEPLOY_BLOCK || DEFAULTS.factoryDeployBlock),
+    },
     style,
     analyst,
     book,
@@ -238,7 +254,10 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (req.method === "POST" && path === "/gas-drip") return send(200, await relayer.gasDrip(await readJson(req), ctx));
       if (req.method === "POST" && path === "/faucet") return send(200, await relayer.faucet(await readJson(req), ctx));
       if (relayer.style && req.method === "POST" && path === "/style") return send(200, await relayer.style.set(await readJson(req), ctx));
-      if (relayer.style && req.method === "GET" && path.startsWith("/style/")) return send(200, relayer.style.get(decodeURIComponent(path.slice("/style/".length))));
+      if (relayer.style && req.method === "GET" && path.startsWith("/style/")) {
+        const vault = decodeURIComponent(path.slice("/style/".length));
+        return send(200, await memo(`style:${vault.toLowerCase().slice(0, 42)}`, 5_000, () => relayer.style.getWithChain(vault)));
+      }
       if (relayer.indexer && req.method === "GET" && path === "/leaderboard") return send(200, await memo("leaderboard", 10_000, () => relayer.indexer.leaderboard()));
       if (relayer.indexer && req.method === "GET" && path === "/metrics") return send(200, await memo("metrics", 10_000, () => relayer.indexer.metrics()));
       if (relayer.indexer && req.method === "GET" && path === "/index") return send(200, relayer.indexer.status());
@@ -252,6 +271,7 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
         if (!card) throw new HttpError(404, "no such agent");
         return send(200, card);
       }
+      if (relayer.contracts && req.method === "GET" && path === "/config") return send(200, relayer.contracts);
       if (relayer.marketplace && req.method === "GET" && path === "/marketplace") {
         const city = new URL(req.url, "http://localhost").searchParams.get("city");
         return send(200, await memo(`marketplace:${String(city).toLowerCase().slice(0, 42)}`, 10_000, () => relayer.marketplace.list({ city })));

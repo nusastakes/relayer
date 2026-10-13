@@ -118,7 +118,7 @@ test("style over HTTP: POST then GET, and the routes are absent when the store i
     const get = await fetch(`${base}/style/${VAULT}`, { headers: { origin: "http://localhost:3000" } });
     assert.equal(get.status, 200);
     assert.equal(get.headers.get("access-control-allow-origin"), "http://localhost:3000");
-    assert.deepEqual(await get.json(), { code: "sakura.7", nonce: "1" });
+    assert.deepEqual(await get.json(), { code: "sakura.7", nonce: "1", onchain: null });
     assert.equal((await fetch(`${base}/style/nope`)).status, 400);
     const replay = await fetch(`${base}/style`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(await request(mayor, "sakura.7", 1)) });
     assert.equal(replay.status, 409);
@@ -131,4 +131,14 @@ test("style over HTTP: POST then GET, and the routes are absent when the store i
   } finally {
     off.server.close();
   }
+});
+
+test("getWithChain: the code stored on-chain by CityVault.setStyle is returned next to the signed one, and anything odd is ignored", async () => {
+  const asBytes32 = (text) => `0x${Buffer.from(text, "utf8").toString("hex").padEnd(64, "0")}`;
+  const store = (value, fail = false) =>
+    createStyleStore({ publicClient: { readContract: async ({ functionName }) => { if (fail) throw new Error("no style()"); return functionName === "style" ? value : mayor.address; } }, factory: FACTORY });
+  assert.deepEqual(await store(asBytes32("klasik.taman")).getWithChain(VAULT), { code: "", nonce: "0", onchain: "klasik.taman" });
+  assert.equal((await store(asBytes32("")).getWithChain(VAULT)).onchain, null, "an unset style is null, not an empty string");
+  assert.equal((await store(asBytes32("<script>alert(1)</script>")).getWithChain(VAULT)).onchain, null, "text that is not a style code is dropped");
+  assert.equal((await store(asBytes32("a"), true).getWithChain(VAULT)).onchain, null, "a v2 vault without style() just has no on-chain value");
 });

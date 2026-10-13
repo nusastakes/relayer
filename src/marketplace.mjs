@@ -18,7 +18,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
 import { dirname } from "node:path";
 import { isIP } from "node:net";
-import { getAddress } from "viem";
+import { encodeAbiParameters, getAddress, keccak256, parseAbi, toBytes } from "viem";
 import { HttpError, Mutex, createRateLimiter } from "./guards.mjs";
 import { identityAbi } from "./erc8004.mjs";
 
@@ -26,6 +26,18 @@ export const CAPABILITY = "nusastakes.city-staff";
 /** Roles a third party may offer: 2 ANALIS (propose only) and 3 HUMAS (report only). 1 SATPAM belongs to the CRE workflow. */
 export const COMMUNITY_ROLES = { 2: "ANALIS", 3: "HUMAS" };
 export const MAX_LISTED = 50;
+/** The capability hash each hireable role uses on the AgentMarketplace contract; CityGuardian maps it back to a role. */
+export const CAPABILITY_BY_ROLE = {
+  2: keccak256(toBytes("nusastakes.city-staff.analis")),
+  3: keccak256(toBytes("nusastakes.city-staff.humas")),
+};
+const marketAbi = parseAbi([
+  "struct Listing { uint256 agentId; address seller; address asset; uint128 price; uint32 period; bytes32 capability; bool active; string uri; }",
+  "struct Stats { uint64 hires; uint64 lastHireAt; uint128 revenue; }",
+  "function listingIdsOf(uint256 agentId) view returns (uint256[])",
+  "function getListing(uint256 listingId) view returns (Listing)",
+  "function statsOf(uint256 listingId) view returns (Stats)",
+]);
 const MAX_CARD_BYTES = 32 * 1024;
 const FETCH_TIMEOUT_MS = 5_000;
 const REGISTRATION_TYPE = "https://eips.ethereum.org/EIPS/eip-8004#registration-v1";
@@ -193,7 +205,7 @@ const guardianReadAbi = [{ type: "function", name: "isActiveAgent", stateMutabil
  * @param {{publicClient: any, identity: any, guardian: string, teamAgents: () => any[], isCity: (address: string) => Promise<boolean>, file?: string | null, now?: () => number, cardFetcher?: Function}} options
  * `teamAgents` returns the team's own entries (from agentList); community entries come from applications saved in `file`.
  */
-export function createMarketplace({ publicClient, identity, guardian, teamAgents, isCity, file = null, now = () => Date.now(), cardFetcher = fetchCard, ipLimit = 5, globalLimit = 30 }) {
+export function createMarketplace({ publicClient, identity, guardian, teamAgents, isCity, market = null, file = null, now = () => Date.now(), cardFetcher = fetchCard, ipLimit = 5, globalLimit = 30 }) {
   /** @type {Map<string, any>} */
   const listed = new Map();
   const mutex = new Mutex();
@@ -217,6 +229,58 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
   }
 
   const read = (functionName, args) => publicClient.readContract({ address: identity.registry.identity, abi: identityAbi, functionName, args });
+
+  /**
+   * What the AgentMarketplace contract currently offers for an agent: each listing with its price, period, on-chain hire
+   * statistics, and whether it can be hired right now (open, made by the agent's current owner, and for the capability
+   * that matches the role). Empty when no marketplace contract is configured.
+   */
+  async function offersOf(agentId, roleId, ownerNow) {
+    if (!market) return [];
+    const ids = await publicClient.readContract({ address: market, abi: marketAbi, functionName: "listingIdsOf", args: [BigInt(agentId)] });
+    return Promise.all(
+      ids.map(async (id) => {
+        const [l, st] = await Promise.all([
+          publicClient.readContract({ address: market, abi: marketAbi, functionName: "getListing", args: [id] }),
+          publicClient.readContract({ address: market, abi: marketAbi, functionName: "statsOf", args: [id] }),
+        ]);
+        const matches = CAPABILITY_BY_ROLE[roleId] === l.capability;
+        const current = ownerNow ? getAddress(l.seller) === getAddress(ownerNow) : true;
+        return {
+          listingId: id.toString(),
+          asset: getAddress(l.asset),
+          price: l.price.toString(),
+          period: Number(l.period),
+          capability: l.capability,
+          capabilityMatchesRole: matches,
+          active: l.active,
+          hireable: l.active && matches && current,
+          hires: Number(st.hires),
+          lastHireAt: Number(st.lastHireAt),
+          revenue: st.revenue.toString(),
+        };
+      }),
+    );
+  }
+
+  /** The call a mayor makes to hire through the contract (the guardian is the hook that grants the role). */
+  function hireInfo(offer, cityAddress) {
+    return {
+      via: "marketplace",
+      contract: market,
+      function: "hire(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data)",
+      permitFunction: "hireWithPermit(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data, uint256 deadline, uint8 v, bytes32 r, bytes32 s)",
+      listingId: offer.listingId,
+      periods: 1,
+      maxTotal: offer.price,
+      hook: guardian,
+      data: cityAddress ? encodeAbiParameters([{ type: "address" }], [cityAddress]) : "abi.encode(address city)",
+      asset: offer.asset,
+      price: offer.price,
+      period: offer.period,
+      note: "the caller must be the city's mayor and must have approved the asset for the marketplace (or sign a permit); the agent's wallet is paid directly",
+    };
+  }
 
   return {
     enabled: true,
@@ -242,6 +306,10 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
       }
       if (/^0x0{40}$/i.test(wallet)) throw new HttpError(400, "the agent has no wallet set");
       const card = validateCard(await cardFetcher(uri), { agentId: text, agentRegistry });
+      if (market) {
+        const offers = await offersOf(text, card.roleId, owner);
+        if (!offers.some((o) => o.hireable)) throw new HttpError(400, "list this agent on the AgentMarketplace contract first (an open listing by its owner with the capability for its role), then apply again; see AGENTS.md");
+      }
       const entry = { agentId: text, owner: getAddress(owner), wallet: getAddress(wallet), agentURI: cleanText(uri, 300), ...card, cardHash: createHash("sha256").update(JSON.stringify(card)).digest("hex"), appliedAt: Math.floor(now() / 1000) };
 
       return mutex.run(async () => {
@@ -280,7 +348,8 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
         role: a.roleName,
         wallet: a.address,
         status: a.status,
-        pricing: a.id === "humas" && a.x402 ? { model: "x402", amount: a.x402.price, also: "free report at GET /report/:city" } : { model: "free" },
+        pricing: { model: "free" },
+        reportPricing: a.id === "humas" && a.x402 ? { model: "x402", amount: a.x402.price, route: a.x402.route, also: "the free report stays at GET /report/:city" } : null,
         erc8004: a.erc8004,
         services: [],
         hireable: true,
@@ -297,6 +366,12 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
       await Promise.all(
         all.map(async (a) => {
           const idText = a.erc8004?.agentId ?? null;
+          a.offers = idText && a.roleId && a.id !== "satpam" ? await offersOf(idText, a.roleId, a.erc8004?.owner ?? null).catch(() => []) : [];
+          const open = a.offers.find((o) => o.hireable);
+          if (open && a.hireable !== false) {
+            a.hireVia = hireInfo(open, cityAddress);
+            a.pricing = { model: BigInt(open.price) === 0n ? "free" : "onchain", asset: open.asset, price: open.price, period: open.period, listingId: open.listingId };
+          }
           a.reputation = idText ? await identity.reputation(idText).catch(() => null) : null;
           if (cityAddress && a.wallet && a.hireable !== false && a.roleId) {
             a.hiredInCity = await publicClient.readContract({ address: guardian, abi: guardianReadAbi, functionName: "isActiveAgent", args: [cityAddress, a.wallet, a.roleId] }).catch(() => null);
@@ -307,7 +382,7 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
       );
       const score = (a) => (a.reputation?.average ?? -1) * 1e6 + (a.reputation?.count ?? 0);
       all.sort((x, y) => score(y) - score(x));
-      return { capability: CAPABILITY, guardian, registry: identity.registry, city: cityAddress, count: all.length, agents: all, apply: "POST /marketplace/apply { agentId } after registering in the Identity Registry; guide in relayer/AGENTS.md" };
+      return { capability: CAPABILITY, guardian, marketplace: market, registry: identity.registry, city: cityAddress, count: all.length, agents: all, apply: "POST /marketplace/apply { agentId } after registering in the Identity Registry; guide in relayer/AGENTS.md" };
     },
   };
 }
