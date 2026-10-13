@@ -30,7 +30,7 @@ import net from "node:net";
 import { createPublicClient, createWalletClient, defineChain, http as viemHttp } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { HttpError, createMemo, createRateLimiter } from "./guards.mjs";
-import { createRelayer } from "./relayer.mjs";
+import { createRelayer, factoryAbi } from "./relayer.mjs";
 import { createStyleStore } from "./style.mjs";
 import { createBookStore } from "./book.mjs";
 import { createEconomy } from "./economy.mjs";
@@ -40,6 +40,7 @@ import { agentList } from "./agents.mjs";
 import { createAnalyst, createPlanStore } from "./analyst.mjs";
 import { createAgentIdentity } from "./erc8004.mjs";
 import { createPaidReports } from "./x402.mjs";
+import { createMarketplace } from "./marketplace.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
@@ -50,6 +51,7 @@ const DEFAULTS = {
   bookFile: "./data/book.json",
   indexFile: "./data/index.json",
   erc8004File: "./deployments/erc8004-testnet.json",
+  marketplaceFile: "./data/marketplace.json",
   publicUrl: "https://relayer-production-39e1.up.railway.app", // where the ERC-8004 registration files are served
   factoryDeployBlock: 70461935, // block of the v2 CityFactory deployment, where the indexer starts
   guardian: "0x083899bEE8138E5f951db568926393FDb1F418A2", // CityGuardian, contracts/deployments/monad-testnet.json
@@ -112,10 +114,26 @@ export function buildRelayerFromEnv(env = process.env) {
   // Pay-per-report with x402 (testnet facilitator); needs the Humas agent. Off with X402=0.
   const x402 = env.X402 === "0" || !humas ? null : createPaidReports({ humas, payTo: env.HUMAS_ADDRESS, price: env.X402_PRICE || "$0.01", publicUrl: env.PUBLIC_URL || DEFAULTS.publicUrl });
   // ERC-8004 identity of the staff (testnet registries). Off with ERC8004=0; agents show as unregistered if the file is missing.
-  const identity = env.ERC8004 === "0" ? null : createAgentIdentity({ publicClient, file: env.ERC8004_FILE === undefined ? DEFAULTS.erc8004File : env.ERC8004_FILE || null, baseUrl: env.PUBLIC_URL || DEFAULTS.publicUrl, x402Agents: x402 ? ["humas"] : [] });
-  return createRelayer({
+  const identity = env.ERC8004 === "0" ? null : createAgentIdentity({ publicClient, file: env.ERC8004_FILE === undefined ? DEFAULTS.erc8004File : env.ERC8004_FILE || null, baseUrl: env.PUBLIC_URL || DEFAULTS.publicUrl, x402Agents: x402 ? ["humas"] : [], x402Price: env.X402_PRICE || "$0.01" });
+  // The staff exchange: team agents plus verified third-party ERC-8004 agents. Needs the ERC-8004 identity. Off with MARKETPLACE=0.
+  const guardianAddress = env.GUARDIAN_ADDRESS || DEFAULTS.guardian;
+  const marketplaceFile = env.MARKETPLACE_FILE === undefined ? DEFAULTS.marketplaceFile : env.MARKETPLACE_FILE;
+  let built;
+  const marketplace =
+    identity && env.MARKETPLACE !== "0"
+      ? createMarketplace({
+          publicClient,
+          identity,
+          guardian: guardianAddress,
+          teamAgents: () => agentList(built, guardianAddress).agents,
+          isCity: (address) => publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "isCity", args: [address] }),
+          file: marketplaceFile || null,
+        })
+      : null;
+  built = createRelayer({
     publicClient,
     walletClient,
+    marketplace,
     style,
     analyst,
     book,
@@ -130,6 +148,7 @@ export function buildRelayerFromEnv(env = process.env) {
       maxAssets: env.MAX_DEPOSIT_ASSETS ? BigInt(env.MAX_DEPOSIT_ASSETS) : undefined,
     },
   });
+  return built;
 }
 
 async function readJson(req, limit = 4096) {
@@ -233,6 +252,11 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
         if (!card) throw new HttpError(404, "no such agent");
         return send(200, card);
       }
+      if (relayer.marketplace && req.method === "GET" && path === "/marketplace") {
+        const city = new URL(req.url, "http://localhost").searchParams.get("city");
+        return send(200, await memo(`marketplace:${String(city).toLowerCase().slice(0, 42)}`, 10_000, () => relayer.marketplace.list({ city })));
+      }
+      if (relayer.marketplace && req.method === "POST" && path === "/marketplace/apply") return send(200, await relayer.marketplace.apply(await readJson(req), ctx));
       if (req.method === "GET" && path === "/agents") {
         const list = agentList(relayer, relayer.analyst?.config?.guardian ?? DEFAULTS.guardian);
         if (!relayer.identity) return send(200, list);

@@ -41,6 +41,8 @@ export const reputationAbi = parseAbi([
 /** Static facts for the registration files. The wallet each agent registers from is in the deployments file. */
 export const STAFF = {
   satpam: {
+    roleId: 1,
+    role: "SATPAM",
     name: "Nusastakes Satpam",
     description:
       "Security guard for Nusastakes cities: a Chainlink CRE workflow that watches a city and the real Morpho vault its yield mirrors, and, when risk is HIGH, asks CityGuardian to pull an adapter's money back to idle. It can only evacuate to idle and only for cities whose mayor enabled it. Proven so far with `cre workflow simulate --broadcast`, not on the production DON.",
@@ -50,6 +52,8 @@ export const STAFF = {
     ],
   },
   analis: {
+    roleId: 2,
+    role: "ANALIS",
     name: "Nusastakes Analis",
     description:
       "Analyst for Nusastakes cities: proposes moving idle cash into the yield adapter, or back, with a plain-language reason. Amounts come from deterministic rules, the reason from an LLM, and nothing moves until the mayor approves. It can only call CityGuardian.propose.",
@@ -59,6 +63,8 @@ export const STAFF = {
     ],
   },
   humas: {
+    roleId: 3,
+    role: "HUMAS",
     name: "Nusastakes Humas",
     description:
       "Public-relations writer for Nusastakes cities: writes the city's weekly report in Indonesian from on-chain events and price snapshots. Read-only; it sends no transactions that move money.",
@@ -74,7 +80,7 @@ export const STAFF = {
  * @param {{publicClient: any, file?: string | null, baseUrl: string, chain?: typeof ERC8004_TESTNET, deployments?: object | null}} options
  * `deployments` (or the JSON `file`) records who registered each agent: { agents: { satpam: { agentId, owner, agentURI, registerTx } } }.
  */
-export function createAgentIdentity({ publicClient, file = null, baseUrl, chain = ERC8004_TESTNET, deployments = null, x402Agents = [] }) {
+export function createAgentIdentity({ publicClient, file = null, baseUrl, chain = ERC8004_TESTNET, deployments = null, x402Agents = [], x402Price = "$0.01" }) {
   let saved = deployments;
   if (!saved && file) {
     try {
@@ -112,6 +118,14 @@ export function createAgentIdentity({ publicClient, file = null, baseUrl, chain 
         active: true,
         registrations: r?.agentId === undefined ? [] : [{ agentId: Number(r.agentId), agentRegistry }],
         supportedTrust: ["reputation"],
+        // How the Nusastakes staff exchange (GET /marketplace) recognises an agent; third-party agents publish the same section.
+        nusastakes: {
+          capability: "nusastakes.city-staff",
+          roleId: meta.roleId,
+          role: meta.role,
+          pricing: x402Agents.includes(id) ? { model: "x402", amount: x402Price } : { model: "free" },
+          hire: "CityGuardian.grantAgent(city, agent, role, expiry), called by the city's mayor",
+        },
       };
     },
 
