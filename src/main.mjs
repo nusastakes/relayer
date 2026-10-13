@@ -6,7 +6,10 @@
 // Environment: everything server.mjs reads, plus RUN_KEEPER=1 (also run the APY keeper), KEEPER_INTERVAL_SEC
 // (default 3600), KEEPER_WINDOW_DAYS (default 3), RESOLVER=1 (settle CityServices prediction markets, every
 // RESOLVER_INTERVAL_SEC, default 60) and RELEASER=1 (release streamed service fees into city vaults, checked every
-// RELEASER_INTERVAL_SEC, default 300, at most every 30 minutes per city). PORT is provided by the host (Railway).
+// RELEASER_INTERVAL_SEC, default 300, at most every 30 minutes per city), RUN_TUNED (write each TunedMirrorAdapter's
+// effective APY, every TUNED_INTERVAL_SEC, default 60; on by default with RUN_KEEPER=1, RUN_TUNED=0 turns it off) and
+// RUN_AUTOPILOT=1 (carry out mayors' rules as their session key, every AUTOPILOT_INTERVAL_SEC, default 120; needs
+// AUTOPILOT_PRIVATE_KEY). PORT is provided by the host (Railway).
 
 import { buildRelayerFromEnv, createHttpServer, parseAllowedOrigins } from "./server.mjs";
 import { parseArgs, step } from "./keeper.mjs";
@@ -125,8 +128,42 @@ if (process.env.RELEASER === "1" && relayer.serviceJobs) {
   releaserTimer = setTimeout(tick, 55_000);
 }
 
+let tunedTimer;
+if (relayer.tuned && (process.env.RUN_TUNED === "1" || (process.env.RUN_KEEPER === "1" && process.env.RUN_TUNED !== "0"))) {
+  const intervalSec = Number(process.env.TUNED_INTERVAL_SEC || 60);
+  const tick = async () => {
+    try {
+      const written = await relayer.tuned.round();
+      if (written.length) console.log(`tuned keeper: ${JSON.stringify(written)}`);
+    } catch (e) {
+      console.error(`tuned keeper failed: ${e.shortMessage || e.message}`);
+    }
+    tunedTimer = setTimeout(tick, intervalSec * 1000);
+  };
+  console.log(`tuned keeper enabled, every ${intervalSec}s`);
+  tunedTimer = setTimeout(tick, 20_000);
+}
+
+let autopilotTimer;
+if (process.env.RUN_AUTOPILOT === "1" && relayer.autopilot?.address) {
+  const intervalSec = Number(process.env.AUTOPILOT_INTERVAL_SEC || 120);
+  const tick = async () => {
+    try {
+      const done = await relayer.autopilot.run();
+      if (done.length) console.log(`autopilot: ${JSON.stringify(done)}`);
+    } catch (e) {
+      console.error(`autopilot failed: ${e.shortMessage || e.message}`);
+    }
+    autopilotTimer = setTimeout(tick, intervalSec * 1000);
+  };
+  console.log(`autopilot ${relayer.autopilot.address} enabled, every ${intervalSec}s`);
+  autopilotTimer = setTimeout(tick, 65_000);
+}
+
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
+    clearTimeout(tunedTimer);
+    clearTimeout(autopilotTimer);
     clearTimeout(resolverTimer);
     clearTimeout(releaserTimer);
     clearTimeout(keeperTimer);

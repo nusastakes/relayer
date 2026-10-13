@@ -188,8 +188,8 @@ test("catalog: sourceId is keccak256 of the pool id, except the primary service"
 
 test("catalog: DefiLlama pools are picked by id and converted to basis points", () => {
   const pools = pickPools([{ pool: SEEDS[1].pool, apy: 5.84244, tvlUsd: 3161972.4 }, { pool: "other", apy: 1 }, { pool: SEEDS[2].pool, apy: null, tvlUsd: "x" }]);
-  assert.deepEqual(pools.get(SEEDS[1].pool), { apyBps: 584, tvlUsd: 3161972 });
-  assert.deepEqual(pools.get(SEEDS[2].pool), { apyBps: 0, tvlUsd: null });
+  assert.deepEqual(pools.get(SEEDS[1].pool), { apyBps: 584, tvlUsd: 3161972, apy: 5.84244, apyBase: null, apyReward: null });
+  assert.deepEqual(pools.get(SEEDS[2].pool), { apyBps: 0, tvlUsd: null, apy: null, apyBase: null, apyReward: null });
   assert.equal(pools.has("other"), false);
   assert.equal(percentToBps(-3), 0);
   assert.equal(percentToBps(129.6), 12960);

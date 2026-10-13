@@ -122,6 +122,27 @@ Untuk `GET /history/:city` pencatat juga membaca `CityGuardian` dan `AgentMarket
 
 Humas adalah anggota staf ketiga: hanya membaca dan menulis laporan, tanpa kunci dan tanpa transaksi. Angka laporan datang dari pencatat dan pembacaan langsung; teksnya disusun dari template atau ditulis ulang oleh LLM (Anthropic dulu, xKiro cadangan), dan tulisan LLM dibuang bila tidak memuat total aset dan persentase hasil. Alasan pemindahan diambil dari rencana Analis yang cocok dengan `planHash`; bila `planHash` itu hash entri buku strategi tersegel, laporan hanya menyebut bahwa alasannya tersegel. Bila riwayat harga baru dimulai setelah awal periode, laporan menyebut sejak kapan datanya ada.
 
+## Setelan protokol dan aturan walikota (`src/tuning.mjs`, `src/tuned.mjs`, `src/autopilot.mjs`)
+
+Walikota menyetel tiap layanan sebatas hak penyetor di protokol aslinya, dan menulis aturannya sendiri; preset hanya templat bagi yang tidak mau repot (vault TC67.10).
+
+- **Setelan** disimpan on-chain di `TunedMirrorAdapter` (`tuning()`; hanya walikota atau session key aktif yang boleh `setTuning`): `abi.encode(uint8 version=1, uint16 loopX100, bool takeRewards, uint16 rangeBps, uint256 centerPriceE8)`, bytes kosong = bawaan. Implementasi per layanan ada di `src/catalog-tuned.json` (`TUNED_IMPLS_FILE`).
+- **APY efektif** (rumus lengkap di kepala `src/tuning.mjs`): hadiah token dengan potongan 10%; *looping* hanya bila protokol menerima aset sebagai jaminan (data `lendBorrow` DefiLlama: LTV > 0, bisa dipinjam; hari ini hanya Neverland), L × simpan − (L − 1) × pinjam, maksimal 3×; rentang Uniswap v3 dengan efisiensi modal `1 / (1 − (1 + r)^(−1/2))` relatif terhadap posisi ±50% (asumsi), 0 di luar rentang. Ditulis ke feed dalam bps, dibatasi 0..5000; kerugian ditulis 0 dan terlihat negatif di `uncappedApyBps`.
+- **Keeper bersetelan** (`RUN_TUNED`, bawaan menyala bersama `RUN_KEEPER=1`, `RUN_TUNED=0` mematikan; tiap `TUNED_INTERVAL_SEC`, bawaan 60): menemukan klon dari `cityInfos` factory dan bytecode EIP-1167, menghitung APY efektif, menulis `ApyFeed.setApy(kunci milik adapter, bps, observedAt)` bila baru, setelan berubah, selisih ≥ 5 bps, atau 6 jam. Klon tidak menghasilkan apa pun sebelum ditulis.
+- **Aturan dan autopilot** (`RUN_AUTOPILOT=1`, tiap `AUTOPILOT_INTERVAL_SEC`, bawaan 120; butuh `AUTOPILOT_PRIVATE_KEY` yang punya MON testnet untuk gas): aturan disimpan di `RULES_FILE` (bawaan `./data/rules.json`, taruh di volume), ditandatangani walikota dengan EIP-712 `CityRules { address vault; bytes32 rulesHash; uint256 nonce }` (domain sama dengan gaya kota), `rulesHash = keccak256(utf8(rulesJson))`. Autopilot hanya bertindak di kota yang menjadikannya session key (`setSessionKey(autopilot, expiry, shiftBps)`), paling banyak 2 aksi per kota per putaran, dalam batas per panggilan dan anggaran per jam vault; tiap aksi membawa `planHash` = keccak256 aturan dan input yang dilihatnya.
+
+| Rute | Isi |
+|---|---|
+| `GET /tuning/preview?service=&loopX100=&takeRewards=&rangeBps=&centerPriceE8=` | `{ service, tuning, effectiveApyBps, uncappedApyBps, inRange, breakdown, notes, knobs, dataFetchedAt }` |
+| `GET /tuning/:adapter` | `{ adapter, vault, serviceId, baseSourceId, ownSourceId, tuning, tuningRaw, effectiveApyBps, uncappedApyBps, inRange, breakdown, notes, onFeed: { apyBps, updatedAt } | null, dataFetchedAt }`; 404 bila bukan klon bersetelan |
+| `GET /tuned` | `{ tunedImpls, lastRound, recent }` |
+| `GET /rules/presets` | `{ presets: [{ id, name, description, rules }] }`: `chase-apy`, `keep-cash-20`, `brake`, `recenter`, `unwind-loop` |
+| `GET /rules/:city` | `{ vault, rules, rulesJson, nonce, updatedAt, status: { autopilot, enabled, autopilotIsSessionKey, sessionKey, sessionKeyExpiry, lastRun, recent, errors } }` |
+| `GET /rules/:city/preview` | uji kering: `{ vault, state, actions }` (tidak ada yang dikirim) |
+| `PUT /rules/:city` | `{ vault, rulesJson, nonce, signature }` → `{ vault, rules, nonce, rulesHash }` |
+
+`GET /catalog` sekarang memberi `impl` (yang dipakai kota BARU: implementasi bersetelan bila ada), `plainImpl`, `tunedImpl`, `knobs` (`rewards`, `loop`, `range`) atau `knobsNote` bila protokol tidak memberi setelan bagi penyetor. `GET /config` memberi `tunedImpls` dan `autopilot`.
+
 ## Buku strategi tersegel (`src/book.mjs`) dan daftar staf (`src/agents.mjs`)
 
 PRD (arsitektur dan R10, bounty B17) menyebut "penyimpanan tak tepercaya" untuk ciphertext buku strategi. Browser mengenkripsi tiap entri dengan kunci turunan passkey (HKDF per entri), jadi relayer hanya memegang ciphertext yang tidak bisa ia baca. Perangkat kedua dengan passkey yang sama menurunkan kunci yang sama, mengambil ciphertext dari sini, dan mendekripsinya (cross-device test). Hash `keccak256(ciphertext)` dicatat on-chain sebagai `planHash` pada `rebalance`; di akhir musim walikota membuka kunci entri pilihan dan siapa pun bisa mengambil ciphertext publik, mendekripsi, dan mencocokkan hash. Entri tidak bisa ditimpa atau dihapus lewat API, supaya keputusan tidak bisa diganti diam-diam setelah hasilnya terlihat. Operator relayer tetap bisa menghapus berkasnya; yang membuktikan isi dan waktunya adalah hash on-chain. Skrip uji: `RELAYER_URL=https://relayer-production-39e1.up.railway.app node scripts/book-check.mjs`.

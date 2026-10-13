@@ -29,7 +29,7 @@ export const REFERENCE = { wealth: 100_000e6, income: 500e6, traffic: 50_000e6 }
 export const WEIGHTS = { wealth: 0.45, income: 0.25, traffic: 0.3 };
 
 const vaultAbi = parseAbi(["function totalAssets() view returns (uint256)", "function adapters() view returns (address[])"]);
-const adapterAbi = parseAbi(["function totalAssets() view returns (uint256)", "function sourceId() view returns (bytes32)"]);
+const adapterAbi = parseAbi(["function totalAssets() view returns (uint256)", "function sourceId() view returns (bytes32)", "function baseSourceId() view returns (bytes32)"]);
 
 /** 0..1 on a log scale: 0 at nothing, 1 at `ref` or more. */
 export function level(amount, ref) {
@@ -97,10 +97,13 @@ export function createScorer({ publicClient, indexer, seeds, primarySourceId, no
     const list = await publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "adapters" });
     return Promise.all(
       list.map(async (address) => {
-        const [assets, sourceId] = await Promise.all([
+        // A TunedMirrorAdapter's sourceId() is its own feed key; the pool it mirrors is baseSourceId() (plain mirrors revert).
+        const [assets, base, own] = await Promise.all([
           publicClient.readContract({ address, abi: adapterAbi, functionName: "totalAssets" }),
+          publicClient.readContract({ address, abi: adapterAbi, functionName: "baseSourceId" }).catch(() => null),
           publicClient.readContract({ address, abi: adapterAbi, functionName: "sourceId" }).catch(() => null),
         ]);
+        const sourceId = base ?? own;
         return { address, assets: assets.toString(), sourceId, category: sourceId ? categoryBySource.get(sourceId.toLowerCase()) ?? null : null };
       }),
     );

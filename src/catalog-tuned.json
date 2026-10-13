@@ -1,0 +1,13 @@
+{
+  "aave-ausd": "0xB38aae47e1766069738223bFF24E0184Fd057B53",
+  "euler-ausd": "0x95cE20A9964cD7509233B061Ba87B822926129c0",
+  "curvance-ausd": "0x9AF0E3A41Bd59D2596A79968E9323E292b3cDB75",
+  "neverland-ausd": "0x4b8B5A6B0326c1527A0F8D9e485F7d548f372946",
+  "accountable-ausd": "0xAD9723df6f5901d2B38bf1d99d220C6409CD83a6",
+  "morpho-hyperusdc": "0x3ed408Ca90066f2b604dB2231d6a15964b7D4F38",
+  "upshift-earnausd": "0xbE2cADdeaf1fE3086b64F8584cD1282CaeD6BdD8",
+  "curve-ausd-3pool": "0x48D195dC7A79716a76A305EB184a301a5E453eB3",
+  "balancer-avusd": "0xdC7ED5ddEf68585767bc6DC17547db9c0a0269A2",
+  "mento-ausd-usdm": "0xE3909cEf6F5B2cF7741B8C43ccC97f06be890BBb",
+  "uniswap-wmon-usdc": "0xddD200abe8910867A0F1e5d076A78F5b9B23d95D"
+}

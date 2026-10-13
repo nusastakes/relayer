@@ -19,6 +19,12 @@
 //   GET  /history/:city?days=7                                    -> the city's events of the last 1..30 days, newest first, with traffic totals (see indexer.history)
 //   GET  /catalog                                                 -> { services, kinds }: the protocol services a mayor can place (live APY/TVL, adapter impl) and the CityServices kinds
 //   GET  /services                                                -> recent actions of the market resolver and the fee releaser
+//   GET  /tuning/preview?service=&loopX100=&takeRewards=&rangeBps=&centerPriceE8=  -> effective APY of a service under a tuning (see tuning.mjs)
+//   GET  /tuning/:adapter                                         -> a TunedMirrorAdapter's tuning, effective APY and what the feed holds
+//   GET  /tuned                                                   -> recent writes of the tuned keeper
+//   GET  /rules/presets                                           -> rule templates (toggles) a mayor can enable
+//   GET  /rules/:city  and  GET /rules/:city/preview              -> the mayor's rules with the autopilot status; what they would do now (dry run)
+//   PUT  /rules/:city { vault, rulesJson, nonce, signature }      -> mayor-signed EIP-712 CityRules (see autopilot.mjs)
 //   GET  /report/:city?days=7                                     -> the Humas's report in Indonesian (the mayor must have hired it)
 //   GET  /agents                                                  -> the AI staff a mayor can hire (Satpam, Analis, Humas)
 //   GET  /analyst                                                 -> { address, role } (the Analyst bot; needs ANALYST_PRIVATE_KEY)
@@ -33,7 +39,9 @@
 // MAPS_DIR (where cached city maps are saved, default ./data/maps; set it to a volume path in production, set to "" to turn /map off), MIRROR_ADAPTER_IMPL (the MirrorYieldAdapter implementation the factory allows, shown by /config),
 // CITY_SERVICES and CITY_SERVICES_FROM_BLOCK (the CityServices contract and its deploy block: indexed for /history and shown by /config),
 // CATALOG_IMPLS_FILE (adapter implementation per catalog service, default src/catalog-impls.json), CATALOG=0 to turn /catalog off,
-// MONAD_MAINNET_RPC (reads the primary vault's TVL for /catalog), HISTORY_HIRES=0 to leave staff hires out of the index.
+// MONAD_MAINNET_RPC (reads the primary vault's TVL for /catalog), HISTORY_HIRES=0 to leave staff hires out of the index,
+// TUNED_IMPLS_FILE (TunedMirrorAdapter implementation per service, default src/catalog-tuned.json), AUTOPILOT_PRIVATE_KEY
+// (the autopilot's own key; without it rules can be stored but nothing runs), RULES_FILE (default ./data/rules.json).
 
 import http from "node:http";
 import net from "node:net";
@@ -58,6 +66,10 @@ import { SEEDS, createCatalog, sharedYields } from "./catalog.mjs";
 import { createScorer } from "./score.mjs";
 import { createServiceJobs } from "./services.mjs";
 import { writeSource } from "./keeper.mjs";
+import { createMarketData, effectiveApy, knobsFor, tuningJson } from "./tuning.mjs";
+import { createTunedKeeper } from "./tuned.mjs";
+import { createAutopilot } from "./autopilot.mjs";
+import { loadImpls, sourceIdOf } from "./catalog.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
@@ -68,6 +80,7 @@ const DEFAULTS = {
   proposalsFile: "./data/proposals.json",
   bookFile: "./data/book.json",
   indexFile: "./data/index.json",
+  rulesFile: "./data/rules.json",
   erc8004File: "./deployments/erc8004-testnet.json",
   marketplaceFile: "./data/marketplace.json",
   publicUrl: "https://relayer-production-39e1.up.railway.app", // where the ERC-8004 registration files are served
@@ -167,6 +180,8 @@ export function buildRelayerFromEnv(env = process.env) {
       : null;
   // Presses the permissionless quarantine/restore buttons of contracts v3 when an adapter fails or recovers. Off with WATCHDOG=0.
   const watchdog = env.WATCHDOG === "0" ? null : createWatchdog({ publicClient, factory, send: (request, options) => built.sendTransaction(request, options), balance: () => publicClient.getBalance({ address: account.address }) });
+  const autopilotAccount = /^0x[0-9a-fA-F]{64}$/.test(env.AUTOPILOT_PRIVATE_KEY || "") ? privateKeyToAccount(env.AUTOPILOT_PRIVATE_KEY) : null;
+  const tunedImplsFile = env.TUNED_IMPLS_FILE || fileURLToPath(new URL("./catalog-tuned.json", import.meta.url));
   built = createRelayer({
     publicClient,
     walletClient,
@@ -187,6 +202,8 @@ export function buildRelayerFromEnv(env = process.env) {
       identityRegistry: identity?.registry.identity ?? null,
       reputationRegistry: identity?.registry.reputation ?? null,
       deployBlock: Number(env.FACTORY_DEPLOY_BLOCK || DEFAULTS.factoryDeployBlock),
+      tunedImpls: loadImpls(tunedImplsFile),
+      autopilot: autopilotAccount?.address ?? null,
     },
     style,
     maps,
@@ -204,6 +221,8 @@ export function buildRelayerFromEnv(env = process.env) {
     },
   });
   const feed = env.FEED_ADDRESS || env.APY_FEED_ADDRESS || DEFAULTS.feed;
+  // Live inputs of the tuning engine (DefiLlama pools and lendBorrow, MON price), shared by the catalog, keeper and autopilot.
+  built.market = createMarketData({ yields: sharedYields, pools: SEEDS.map((s) => s.pool) });
   built.catalog =
     env.CATALOG === "0"
       ? null
@@ -217,6 +236,8 @@ export function buildRelayerFromEnv(env = process.env) {
           mirrorImpl: env.MIRROR_ADAPTER_IMPL || DEFAULTS.mirrorImpl,
           cityServices,
           implsFile: env.CATALOG_IMPLS_FILE || fileURLToPath(new URL("./catalog-impls.json", import.meta.url)),
+          tunedImplsFile,
+          market: built.market,
         });
   // Settles prediction markets and releases streamed service fees (main.mjs runs them with RESOLVER=1 / RELEASER=1).
   built.serviceJobs =
@@ -225,7 +246,42 @@ export function buildRelayerFromEnv(env = process.env) {
       : null;
   // City score (vault TC67.8): variety of services, how many are active, and the city's own economy.
   built.scorer = indexer ? createScorer({ publicClient, indexer, seeds: SEEDS, primarySourceId: env.APY_SOURCE_ID || DEFAULTS.sourceId }) : null;
+  // Protocol tuning (vault TC67.10): the keeper writes each TunedMirrorAdapter's effective APY (main.mjs, RUN_TUNED), and the
+  // autopilot carries out the mayor's rules as the city's session key (RUN_AUTOPILOT=1, needs AUTOPILOT_PRIVATE_KEY).
+  built.tuned = createTunedKeeper({ publicClient, send: (request, options) => built.sendTransaction(request, options), factory, feed, tunedImpls: loadImpls(tunedImplsFile), market: built.market });
+  const rulesFile = env.RULES_FILE === undefined ? DEFAULTS.rulesFile : env.RULES_FILE;
+  built.autopilot = createAutopilot({
+    publicClient,
+    walletClient: autopilotAccount ? createWalletClient({ account: autopilotAccount, chain, transport: viemHttp(rpc) }) : null,
+    factory,
+    feed,
+    tuned: built.tuned,
+    market: built.market,
+    seeds: SEEDS,
+    sourceIdOfSeed: (seed) => sourceIdOf(seed, env.APY_SOURCE_ID || DEFAULTS.sourceId),
+    file: rulesFile || null,
+  });
   return built;
+}
+
+/** GET /tuning/preview: the effective APY of a catalog service under a tuning, without an adapter. */
+async function tuningPreview(relayer, q) {
+  const service = q.get("service");
+  const seed = SEEDS.find((s) => s.id === service);
+  if (!seed) throw new HttpError(400, "service must be a catalog service id");
+  const int = (name, def, min, max) => {
+    const raw = q.get(name);
+    if (raw === null || raw === "") return def;
+    const v = Number(raw);
+    if (!Number.isInteger(v) || v < min || v > max) throw new HttpError(400, `${name} must be an integer ${min}..${max}`);
+    return v;
+  };
+  const centerRaw = q.get("centerPriceE8");
+  if (centerRaw !== null && centerRaw !== "" && !/^[0-9]{1,30}$/.test(centerRaw)) throw new HttpError(400, "centerPriceE8 must be a non-negative integer");
+  const tuning = { version: 1, loopX100: int("loopX100", 100, 100, 300), takeRewards: q.get("takeRewards") !== "false" && q.get("takeRewards") !== "0", rangeBps: int("rangeBps", 0, 0, 10000), centerPriceE8: BigInt(centerRaw || 0) };
+  const data = await relayer.market.forPool(seed.pool);
+  const res = effectiveApy(seed.id, tuning, data);
+  return { service: seed.id, tuning: tuningJson(tuning), effectiveApyBps: res.effectiveApyBps, uncappedApyBps: res.uncappedApyBps, inRange: res.inRange, breakdown: res.breakdown, notes: res.notes, knobs: knobsFor(seed.id, seed.category, data), dataFetchedAt: data.fetchedAt };
 }
 
 async function readJson(req, limit = 4096) {
@@ -349,6 +405,26 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       }
       if (relayer.catalog && req.method === "GET" && path === "/catalog") return send(200, await memo("catalog", 60_000, () => relayer.catalog.get()));
       if (relayer.serviceJobs && req.method === "GET" && path === "/services") return send(200, relayer.serviceJobs.info());
+      if (relayer.tuned && req.method === "GET" && path === "/tuning/preview") {
+        const q = new URL(req.url, "http://localhost").searchParams;
+        return send(200, await memo(`tuning-preview:${q.toString().slice(0, 300)}`, 15_000, () => tuningPreview(relayer, q)));
+      }
+      if (relayer.tuned && req.method === "GET" && path === "/tuned") return send(200, relayer.tuned.info());
+      if (relayer.tuned && req.method === "GET" && path.startsWith("/tuning/")) {
+        const adapter = decodeURIComponent(path.slice("/tuning/".length));
+        if (!/^0x[0-9a-fA-F]{40}$/.test(adapter)) throw new HttpError(400, "adapter must be an address");
+        const out = await memo(`tuning:${adapter.toLowerCase()}`, 10_000, () => relayer.tuned.describe(adapter));
+        if (!out) throw new HttpError(404, "this adapter is not a TunedMirrorAdapter clone");
+        return send(200, out);
+      }
+      if (relayer.autopilot && req.method === "GET" && path === "/rules/presets") return send(200, relayer.autopilot.presets());
+      if (relayer.autopilot && path.startsWith("/rules/")) {
+        const rest = decodeURIComponent(path.slice("/rules/".length));
+        const [city, sub] = rest.split("/");
+        if (req.method === "GET" && sub === "preview") return send(200, await memo(`rules-preview:${city.toLowerCase().slice(0, 42)}`, 10_000, () => relayer.autopilot.preview(city)));
+        if (req.method === "GET" && !sub) return send(200, await memo(`rules:${city.toLowerCase().slice(0, 42)}`, 5_000, () => relayer.autopilot.get(city)));
+        if (req.method === "PUT" && !sub) return send(200, await relayer.autopilot.set(city, await readJson(req, 12_000), ctx));
+      }
       if (relayer.economy && req.method === "GET" && path === "/economy") return send(200, await relayer.economy.get());
       if (relayer.x402 && req.method === "GET" && path.startsWith("/paid/report/")) return await relayer.x402.handle(req, res, ctx, corsHeaders);
       if (relayer.humas && req.method === "GET" && path.startsWith("/report/")) {

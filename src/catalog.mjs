@@ -12,6 +12,7 @@
 
 import { readFileSync } from "node:fs";
 import { keccak256, parseAbi, toHex } from "viem";
+import { knobsFor } from "./tuning.mjs";
 
 export const YIELDS_URL = "https://yields.llama.fi/pools";
 /** Same ceiling as ApyFeed.MAX_APY_BPS (50% a year): a higher APY is shown as is but written to the feed clamped. */
@@ -71,7 +72,9 @@ export function loadImpls(file) {
 export function pickPools(data, seeds = SEEDS) {
   const wanted = new Set(seeds.map((s) => s.pool));
   const out = new Map();
-  for (const p of Array.isArray(data) ? data : []) if (p && wanted.has(p.pool)) out.set(p.pool, { apyBps: percentToBps(p.apy), tvlUsd: typeof p.tvlUsd === "number" && Number.isFinite(p.tvlUsd) ? Math.round(p.tvlUsd) : null });
+  const pct = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  // apy, apyBase and apyReward (percent) are kept for the tuning engine (src/tuning.mjs).
+  for (const p of Array.isArray(data) ? data : []) if (p && wanted.has(p.pool)) out.set(p.pool, { apyBps: percentToBps(p.apy), tvlUsd: typeof p.tvlUsd === "number" && Number.isFinite(p.tvlUsd) ? Math.round(p.tvlUsd) : null, apy: pct(p.apy), apyBase: pct(p.apyBase), apyReward: pct(p.apyReward) });
   return out;
 }
 
@@ -120,7 +123,7 @@ const vaultAbi = parseAbi(["function totalAssets() view returns (uint256)"]);
  * GET /catalog. `publicClient` reads ApyFeed on testnet; `mainnetClient` (optional) reads the primary vault's TVL on mainnet.
  * Nothing here can fail the whole answer: each live part falls back to the seed values.
  */
-export function createCatalog({ publicClient, mainnetClient = null, yields, feed, primarySourceId, primaryVault = null, mirrorImpl = null, cityServices = null, implsFile, now = () => Date.now(), seeds = SEEDS }) {
+export function createCatalog({ publicClient, mainnetClient = null, yields, feed, primarySourceId, primaryVault = null, mirrorImpl = null, cityServices = null, implsFile, tunedImplsFile = null, market = null, now = () => Date.now(), seeds = SEEDS }) {
   let primaryTvl = { at: 0, value: null };
   async function readPrimaryTvl() {
     if (!mainnetClient || !primaryVault) return null;
@@ -153,12 +156,17 @@ export function createCatalog({ publicClient, mainnetClient = null, yields, feed
     },
     async get() {
       const impls = { ...(mirrorImpl ? { [PRIMARY_ID]: mirrorImpl } : {}), ...loadImpls(implsFile) };
-      const [reading, tvl0] = await Promise.all([yields ? yields.get().catch(() => null) : null, readPrimaryTvl()]);
+      const tunedImpls = tunedImplsFile ? loadImpls(tunedImplsFile) : {};
+      const [reading, tvl0, m] = await Promise.all([yields ? yields.get().catch(() => null) : null, readPrimaryTvl(), market ? market.get().catch(() => null) : null]);
       const services = await Promise.all(
         seeds.map(async (s) => {
           const sourceId = sourceIdOf(s, primarySourceId);
-          const impl = impls[s.id] ?? null;
-          const onFeed = impl ? await readFeed(sourceId) : null;
+          const plainImpl = impls[s.id] ?? null;
+          // What a NEW city should use: the tuned implementation when there is one (the mayor can tune it), else the plain one.
+          const tunedImpl = tunedImpls[s.id] ?? null;
+          const impl = tunedImpl ?? plainImpl;
+          const knobs = tunedImpl && m ? knobsFor(s.id, s.category, { pool: m.pools.get(s.pool) ?? null, lend: m.lend.get(s.pool) ?? null, monPriceUsd: m.monPriceUsd }) : null;
+          const onFeed = plainImpl ? await readFeed(sourceId) : null;
           const live = reading?.pools.get(s.pool) ?? null;
           let apyBps = live?.apyBps ?? s.apyBps;
           let tvlUsd = live?.tvlUsd ?? s.tvlUsd;
@@ -170,14 +178,18 @@ export function createCatalog({ publicClient, mainnetClient = null, yields, feed
             tvlUsd = tvl0 ?? null;
             source = onFeed ? "apyfeed" : "none";
           }
-          return { id: s.id, name: s.name, protocol: s.protocol, category: s.category, asset: s.asset, pool: s.pool, sourceId, impl, apyBps, tvlUsd, observedAt, source, feed: onFeed, feedClamped: apyBps !== null && apyBps > FEED_MAX_APY_BPS };
+          return {
+            id: s.id, name: s.name, protocol: s.protocol, category: s.category, asset: s.asset, pool: s.pool, sourceId, impl, plainImpl, tunedImpl, apyBps, tvlUsd, observedAt, source, feed: onFeed, feedClamped: apyBps !== null && apyBps > FEED_MAX_APY_BPS,
+            knobs,
+            ...(knobs ? {} : { knobsNote: tunedImpl ? "live data for the knobs is not available right now" : "this protocol gives depositors nothing to tune: the mayor chooses only how much of the city goes here" }),
+          };
         }),
       );
       return {
         asOf: Math.floor(now() / 1000),
         network: "Monad testnet (funds) mirroring Monad mainnet (rates)",
         source: { yields: YIELDS_URL, fetchedAt: reading?.fetchedAt ?? null, ...(yields ? { error: yields.status().error } : {}) },
-        note: "Yield is simulated on testnet by MirrorYieldAdapter at the APY ApyFeed reports for the mainnet pool; only services with an `impl` can be picked when founding a city. The feed caps APY at 50%.",
+        note: "Yield is simulated on testnet by MirrorYieldAdapter at the APY ApyFeed reports for the mainnet pool; only services with an `impl` can be picked when founding a city. The feed caps APY at 50%. A service with a `tunedImpl` uses TunedMirrorAdapter: the mayor tunes it (`knobs`) and it earns the APY of that tuning (GET /tuning/preview).",
         services,
         // Prediction markets are held back on the deployed contract (`predictionEnabled` is false; vault TC67.8).
         kinds: SERVICE_KINDS.map((k) => ({ ...k, contract: cityServices || null, enabled: k.kind !== 2 })),
