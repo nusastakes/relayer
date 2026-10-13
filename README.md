@@ -29,11 +29,14 @@ tangan permit), siapa pun pengirimnya.
 | `GET /marketplace` | | bursa staf: agen tim dan agen komunitas yang lolos pemeriksaan, urut rata-rata penilaian ERC-8004; `?city=0x…` menambahkan `hiredInCity` per agen |
 | `POST /marketplace/apply` | `{ "agentId": "…" }` | agen pihak ketiga mengajukan diri; server memeriksa identitas, dompet, berkas registrasinya, dan listing terbuka milik pemiliknya di kontrak `AgentMarketplace` (panduan: `AGENTS.md`) |
 | `GET /watchdog` | | status penjaga karantina: pemindaian terakhir, jumlah kota dan adapter, tindakan terbaru, galat |
-| `GET /config` | | alamat kontrak v3 (`factory`, `guardian`, `feed`, `reserve`, `marketplace`, `asset`, `mirrorAdapterImpl` = implementasi `MirrorYieldAdapter` yang diizinkan factory, registry ERC-8004), `version`, `deployBlock`: satu sumber untuk frontend |
+| `GET /config` | | alamat kontrak v3 (`factory`, `guardian`, `feed`, `reserve`, `marketplace`, `asset`, `mirrorAdapterImpl` = implementasi `MirrorYieldAdapter` yang diizinkan factory, `cityServices` dan `cityServicesFromBlock` dari `CITY_SERVICES`, registry ERC-8004), `version`, `deployBlock`: satu sumber untuk frontend |
 | `GET /agents/:id/card.json` | | berkas registrasi ERC-8004 agen (`satpam`, `analis`, `humas`), yang menjadi `agentURI` di registry |
 | `GET /leaderboard` | | kota diurutkan menurut return sejak berdiri: `{ rank, name, community, mayor, tvl, returnBps, residents, createdAt, ranked }`. TVL dan return dibaca langsung dari rantai, jumlah penduduk dari pencatat. Kota dengan TVL di bawah 1 AUSD atau tanpa share tidak diberi peringkat (`rank: null`), karena harga share kota kosong tidak berarti |
 | `GET /metrics`, `GET /index` | | angka platform untuk cerita traksi (kota, walikota, penduduk, TVL, jumlah setor dan tarik) dan kemajuan pencatat (`complete`, `behindBlocks`) |
 | `GET /economy` | | laporan ekonomi (R13): fee per sektor Monad dari DefiLlama untuk 24 jam, 7 hari, dan 30 hari, lengkap dengan sumber, URL, dan waktu pengambilan; di-cache 10 menit, dan memakai data lama (`stale: true`) bila DefiLlama tidak terjangkau |
+| `GET /history/:city?days=7` | | riwayat kota 1 sampai 30 hari dari pencatat, terbaru di depan: `{ city, name, mayor, days, from, to, truncated, totals, services, markets, tokens, events }`. `totals` (satuan dasar AUSD, 6 desimal, sebagai string): `traffic` = setor + tarik + volume layanan + bayaran sewa staf (`outsideTraffic` dan `uniqueUsers` tanpa alamat walikota), `deposits`, `withdrawals`, `netFlow`, `serviceVolume`, `serviceFees` (fee yang diperoleh kota), `feesReleased` (fee yang sudah dialirkan ke vault), `serviceUses`, `rebalanceVolume`, `rebalanceCount` (dihitung terpisah, bukan lalu lintas), `hires`, `hirePayments`. Jenis event: `deposit`, `withdraw`, `rebalance`, `hire`, `launch`, `trade`, `predict`, `service`, `service-set`, `market-open`, `market-resolved`, `claim`, `fees-released`, `fee`, `evacuate`, `reveal`. 404 bila pencatat belum mengenal kota itu |
+| `GET /catalog` | | katalog layanan: 18 layanan protokol Monad (`id`, `name`, `protocol`, `category`, `asset`, `pool`, `sourceId` = keccak256 id pool DefiLlama, `impl` implementasi adapter atau `null` bila belum bisa dipilih, `apyBps`, `tvlUsd`, `observedAt`, `source`, `feed` = nilai di `ApyFeed`, `feedClamped` bila APY di atas batas feed 50%) dan `kinds` (layanan non-imbal-hasil `CityServices`: 1 peluncur token, 2 pasar prediksi, dengan alamat kontraknya). DefiLlama Yields di-cache 15 menit; layanan utama (Morpho Grove x Steakhouse) memakai APY dari `ApyFeed` dan TVL `totalAssets` vault mainnet |
+| `GET /services` | | tindakan terbaru penyelesai pasar prediksi dan pengalir fee layanan (`RESOLVER=1`, `RELEASER=1`) |
 | `GET /report/:city?days=7` | | laporan Humas dalam bahasa Indonesia (1 sampai 30 hari) dari event on-chain dan snapshot harga; hanya untuk kota yang walikotanya memberi Humas (`0x8Df168681FE3EF206D8a3fE8eC0C003A776aD498`) peran `HUMAS` (3), jika tidak `status: not-hired` |
 | `GET /analyst` | | `{ address, role: 2, roleName: "ANALIS", guardian, llm }`: alamat bot Analis (`0xDFef53a0d68fd0481c5d4b3D708F3Ed2e6313B1e`), yang harus diberi peran `ANALIS` oleh walikota |
 | `GET /proposals/:city` | | usulan Analis untuk kota itu: `{ proposalId, planHash, txHash, status: pending / approved / expired, plan }` dengan `plan` memuat alasan dan angka; `keccak256(JSON.stringify(plan)) == planHash` |
@@ -113,6 +116,10 @@ Alasan usulan ditulis dalam bahasa Indonesia dari fakta. Bila `ANTHROPIC_API_KEY
 
 RPC publik Monad membatasi `eth_getLogs` ke 100 blok per permintaan, jadi pencatat berjalan di latar belakang dari blok deploy factory, per potongan, dan mengingat sampai mana ia membaca (berkas di volume). Yang disimpan: kota dan walikotanya (event `CityCreated`), pemegang share dari event `Transfer`, buku besar setoran, penarikan, pemindahan dana, evakuasi, fee, dan pembukaan kunci (dengan waktu blok), dan snapshot harga share serta total aset tiap jam. TVL dan return selalu dibaca langsung dari rantai. Backfill pertama (±40 ribu blok) memakan ±4,5 menit. Penduduk = pemegang share yang pernah setor (penerima fee walikota dan treasury tidak ikut kecuali mereka juga setor). Semua yang disimpan bisa dibangun ulang dari rantai.
 
+Untuk `GET /history/:city` pencatat juga membaca `CityGuardian` dan `AgentMarketplace` (sewa staf berbayar = `Hired` lalu `AgentGranted` dalam satu transaksi; `HISTORY_HIRES=0` mematikannya) serta kontrak `CityServices` bila `CITY_SERVICES` diisi (mulai dari `CITY_SERVICES_FROM_BLOCK`). Kontrak yang ditambahkan setelah pencatat melewati blok awalnya dibaca ulang sekali sebagai backfill terpisah (`backfillBlocks` di `GET /index`), lalu buku besar diurutkan lagi menurut blok. Buku besar menyimpan 1.000 event terakhir per kota; `truncated: true` bila jendela waktu lebih panjang dari yang tersimpan.
+
+`CityServices` menjual layanan kota ke pengguna luar: fee tiap pemakaian dialirkan ke vault kota selama periode drip. Dua tugas latar opsional hanya menekan tombol tanpa izin, lewat pengirim relayer yang mengestimasi gas dulu (panggilan yang akan revert tidak dikirim): `RESOLVER=1` (tiap `RESOLVER_INTERVAL_SEC`, bawaan 60) menyelesaikan pasar prediksi yang `resolvesAt`-nya sudah lewat, dan bila nilai `ApyFeed` sumber pasar itu ditulis sebelum `resolvesAt`, menyuruh keeper menulis nilai baru dulu; `RELEASER=1` (tiap `RELEASER_INTERVAL_SEC`, bawaan 300) memanggil `release(city)` untuk kota yang punya fee jatuh tempo, paling sering 30 menit sekali per kota.
+
 Humas adalah anggota staf ketiga: hanya membaca dan menulis laporan, tanpa kunci dan tanpa transaksi. Angka laporan datang dari pencatat dan pembacaan langsung; teksnya disusun dari template atau ditulis ulang oleh LLM (Anthropic dulu, xKiro cadangan), dan tulisan LLM dibuang bila tidak memuat total aset dan persentase hasil. Alasan pemindahan diambil dari rencana Analis yang cocok dengan `planHash`; bila `planHash` itu hash entri buku strategi tersegel, laporan hanya menyebut bahwa alasannya tersegel. Bila riwayat harga baru dimulai setelah awal periode, laporan menyebut sejak kapan datanya ada.
 
 ## Buku strategi tersegel (`src/book.mjs`) dan daftar staf (`src/agents.mjs`)
@@ -161,6 +168,10 @@ Membaca APY vault AUSD di mainnet dan menulisnya ke `ApyFeed` di testnet, sehing
 - **Penulisan:** `ApyFeed.setApy(sourceId, apyBps, observedAt)` dari kunci `RELAYER_PRIVATE_KEY`, yang harus menjadi
   `updater` di feed. Ditulis hanya bila berubah >= 5 bps atau bacaan terakhir lebih tua dari 6 jam.
 - Contoh hasil (13 Okt 2026): 128 bps (1,28%); `apy` Morpho melaporkan 1,29% dan `netApy` 1,50% (memasukkan reward).
+- **Sumber katalog:** setiap layanan katalog lain yang implementasi adapternya tercantum di `src/catalog-impls.json`
+  (atau `CATALOG_IMPLS_FILE`) ditulis di bawah `sourceId` = keccak256 id pool DefiLlama, dengan field `apy` DefiLlama
+  Yields, satu transaksi demi satu transaksi, dengan aturan 5 bps / 6 jam yang sama. APY di atas 50% (batas `ApyFeed`)
+  ditulis sebagai 5000 bps. Galat satu sumber tidak menghentikan sumber lain.
 
 ```
 npm run keeper:dry                        # hitung dan cetak, tidak mengirim apa pun
@@ -168,7 +179,7 @@ RELAYER_PRIVATE_KEY=0x… npm run keeper    # tulis sekali
 RELAYER_PRIVATE_KEY=0x… node src/keeper.mjs --loop --interval 3600
 ```
 
-Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`, `APY_SOURCE_VAULT`, `APY_SOURCE_ID`.
+Variabel opsional: `MONAD_MAINNET_RPC`, `MONAD_TESTNET_RPC`, `APY_FEED_ADDRESS`, `APY_SOURCE_VAULT`, `APY_SOURCE_ID`, `CATALOG_IMPLS_FILE`.
 
 ## Belum diuji / batasan
 

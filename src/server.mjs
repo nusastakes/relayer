@@ -15,6 +15,10 @@
 //   PUT  /book { owner, id, ciphertext, nonce, signature }        -> { hash, ... }   (sealed strategy book: ciphertext only, see src/book.mjs)
 //   GET  /book/:owner  and  GET /book/:owner/:id                  -> entries (ciphertext on the second)
 //   GET  /leaderboard, /metrics, /index, /economy                 -> cities ranked by return with live TVL and indexed residents; platform numbers; indexer progress; DefiLlama fees per sector
+//   GET  /score/:city                                             -> the city's score from its services: variety, count, wealth, 7-day income and outside traffic (see score.mjs)
+//   GET  /history/:city?days=7                                    -> the city's events of the last 1..30 days, newest first, with traffic totals (see indexer.history)
+//   GET  /catalog                                                 -> { services, kinds }: the protocol services a mayor can place (live APY/TVL, adapter impl) and the CityServices kinds
+//   GET  /services                                                -> recent actions of the market resolver and the fee releaser
 //   GET  /report/:city?days=7                                     -> the Humas's report in Indonesian (the mayor must have hired it)
 //   GET  /agents                                                  -> the AI staff a mayor can hire (Satpam, Analis, Humas)
 //   GET  /analyst                                                 -> { address, role } (the Analyst bot; needs ANALYST_PRIVATE_KEY)
@@ -26,10 +30,14 @@
 // INDEX_FILE (default ./data/index.json), INDEXER=0 / ECONOMY=0 to turn those off, INDEX_RANGE (logs per request, default 100; some RPCs allow 10000), INDEX_RPC (a separate RPC for getLogs only, e.g. Envio HyperRPC), INDEX_START_BLOCK, HUMAS_ADDRESS (turns the Humas on),
 // BOOK_FILE (default ./data/book.json, "" turns /book off), ANALYST_PRIVATE_KEY (turns the Analyst on), PROPOSALS_FILE (default ./data/proposals.json), ANTHROPIC_API_KEY and/or XKIRO_API_KEY (optional, they write the reasons; Anthropic is tried first), ANALYST_LLM=0 to ignore the keys, ANALYST_LLM_MODEL, XKIRO_MODEL,
 // STYLE_FILE (where city styles are saved, default ./data/styles.json; set it to a volume path in production, set to "" to turn /style off),
-// MAPS_DIR (where cached city maps are saved, default ./data/maps; set it to a volume path in production, set to "" to turn /map off), MIRROR_ADAPTER_IMPL (the MirrorYieldAdapter implementation the factory allows, shown by /config).
+// MAPS_DIR (where cached city maps are saved, default ./data/maps; set it to a volume path in production, set to "" to turn /map off), MIRROR_ADAPTER_IMPL (the MirrorYieldAdapter implementation the factory allows, shown by /config),
+// CITY_SERVICES and CITY_SERVICES_FROM_BLOCK (the CityServices contract and its deploy block: indexed for /history and shown by /config),
+// CATALOG_IMPLS_FILE (adapter implementation per catalog service, default src/catalog-impls.json), CATALOG=0 to turn /catalog off,
+// MONAD_MAINNET_RPC (reads the primary vault's TVL for /catalog), HISTORY_HIRES=0 to leave staff hires out of the index.
 
 import http from "node:http";
 import net from "node:net";
+import { fileURLToPath } from "node:url";
 import { createPublicClient, createWalletClient, defineChain, http as viemHttp } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { HttpError, createMemo, createRateLimiter } from "./guards.mjs";
@@ -46,6 +54,10 @@ import { createAgentIdentity } from "./erc8004.mjs";
 import { createPaidReports } from "./x402.mjs";
 import { createMarketplace } from "./marketplace.mjs";
 import { createWatchdog } from "./watchdog.mjs";
+import { SEEDS, createCatalog, sharedYields } from "./catalog.mjs";
+import { createScorer } from "./score.mjs";
+import { createServiceJobs } from "./services.mjs";
+import { writeSource } from "./keeper.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
@@ -67,6 +79,8 @@ const DEFAULTS = {
   mirrorImpl: "0x156fDb80Bd936f1CF1d45A1a167B660A82043080", // MirrorYieldAdapter implementation the factory allows (clones of it are the cities' adapters)
   sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d", // morpho-grove-steakhouse-high-yield-ausd-mainnet
   asset: "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC", // AUSD testnet
+  mainnetRpc: "https://rpc.monad.xyz",
+  primaryVault: "0x32841A8511D5c2c5b253f45668780B99139e476D", // Morpho Grove x Steakhouse High Yield AUSD on mainnet, the primary catalog service
 };
 
 export function buildRelayerFromEnv(env = process.env) {
@@ -103,6 +117,8 @@ export function buildRelayerFromEnv(env = process.env) {
     });
   }
   const indexFile = env.INDEX_FILE === undefined ? DEFAULTS.indexFile : env.INDEX_FILE;
+  const cityServices = /^0x[0-9a-fA-F]{40}$/.test(env.CITY_SERVICES || "") ? env.CITY_SERVICES : null;
+  const startBlock = env.INDEX_START_BLOCK || DEFAULTS.factoryDeployBlock;
   const indexer =
     env.INDEXER === "0"
       ? null
@@ -111,7 +127,14 @@ export function buildRelayerFromEnv(env = process.env) {
           // INDEX_RPC: an RPC used only for getLogs, for example Envio HyperRPC (https://monad-testnet.rpc.hypersync.xyz/<token>) with a larger INDEX_RANGE.
           logsClient: env.INDEX_RPC ? createPublicClient({ chain, transport: viemHttp(env.INDEX_RPC) }) : undefined,
           file: indexFile || undefined,
-          config: { factory, startBlock: env.INDEX_START_BLOCK || DEFAULTS.factoryDeployBlock, range: env.INDEX_RANGE ? Number(env.INDEX_RANGE) : 100 },
+          config: {
+            factory,
+            startBlock,
+            range: env.INDEX_RANGE ? Number(env.INDEX_RANGE) : 100,
+            // Staff hires (paid through the marketplace, granted by the guardian) and the city services count as city traffic.
+            ...(env.HISTORY_HIRES === "0" ? {} : { guardian: env.GUARDIAN_ADDRESS || DEFAULTS.guardian, market: env.MARKETPLACE_ADDRESS || DEFAULTS.market }),
+            ...(cityServices ? { services: cityServices, servicesFromBlock: env.CITY_SERVICES_FROM_BLOCK || startBlock } : {}),
+          },
         });
   const economy = env.ECONOMY === "0" ? null : createEconomy();
   const bookFile = env.BOOK_FILE === undefined ? DEFAULTS.bookFile : env.BOOK_FILE;
@@ -157,6 +180,8 @@ export function buildRelayerFromEnv(env = process.env) {
       feed: env.FEED_ADDRESS || env.APY_FEED_ADDRESS || DEFAULTS.feed,
       reserve: env.YIELD_RESERVE_ADDRESS || DEFAULTS.reserve || null,
       mirrorAdapterImpl: env.MIRROR_ADAPTER_IMPL || DEFAULTS.mirrorImpl || null,
+      cityServices,
+      cityServicesFromBlock: cityServices && env.CITY_SERVICES_FROM_BLOCK ? Number(env.CITY_SERVICES_FROM_BLOCK) : null,
       marketplace: env.MARKETPLACE_ADDRESS || DEFAULTS.market,
       asset: DEFAULTS.asset,
       identityRegistry: identity?.registry.identity ?? null,
@@ -178,6 +203,28 @@ export function buildRelayerFromEnv(env = process.env) {
       maxAssets: env.MAX_DEPOSIT_ASSETS ? BigInt(env.MAX_DEPOSIT_ASSETS) : undefined,
     },
   });
+  const feed = env.FEED_ADDRESS || env.APY_FEED_ADDRESS || DEFAULTS.feed;
+  built.catalog =
+    env.CATALOG === "0"
+      ? null
+      : createCatalog({
+          publicClient,
+          mainnetClient: createPublicClient({ transport: viemHttp(env.MONAD_MAINNET_RPC || DEFAULTS.mainnetRpc) }),
+          yields: sharedYields,
+          feed,
+          primarySourceId: env.APY_SOURCE_ID || DEFAULTS.sourceId,
+          primaryVault: env.APY_SOURCE_VAULT || DEFAULTS.primaryVault,
+          mirrorImpl: env.MIRROR_ADAPTER_IMPL || DEFAULTS.mirrorImpl,
+          cityServices,
+          implsFile: env.CATALOG_IMPLS_FILE || fileURLToPath(new URL("./catalog-impls.json", import.meta.url)),
+        });
+  // Settles prediction markets and releases streamed service fees (main.mjs runs them with RESOLVER=1 / RELEASER=1).
+  built.serviceJobs =
+    cityServices && indexer
+      ? createServiceJobs({ publicClient, send: (request, options) => built.sendTransaction(request, options), indexer, address: cityServices, feed, writeSource: (sourceId) => writeSource(sourceId) })
+      : null;
+  // City score (vault TC67.8): variety of services, how many are active, and the city's own economy.
+  built.scorer = indexer ? createScorer({ publicClient, indexer, seeds: SEEDS, primarySourceId: env.APY_SOURCE_ID || DEFAULTS.sourceId }) : null;
   return built;
 }
 
@@ -285,6 +332,23 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (relayer.indexer && req.method === "GET" && path === "/leaderboard") return send(200, await memo("leaderboard", 10_000, () => relayer.indexer.leaderboard()));
       if (relayer.indexer && req.method === "GET" && path === "/metrics") return send(200, await memo("metrics", 10_000, () => relayer.indexer.metrics()));
       if (relayer.indexer && req.method === "GET" && path === "/index") return send(200, relayer.indexer.status());
+      if (relayer.indexer && req.method === "GET" && path.startsWith("/history/")) {
+        const city = decodeURIComponent(path.slice("/history/".length));
+        if (!/^0x[0-9a-fA-F]{40}$/.test(city)) throw new HttpError(400, "city must be a vault address");
+        const days = Math.min(30, Math.max(1, Math.floor(Number(new URL(req.url, "http://localhost").searchParams.get("days") ?? 7)) || 7));
+        const out = await memo(`history:${city.toLowerCase()}:${days}`, 10_000, async () => relayer.indexer.history(city, days));
+        if (!out) throw new HttpError(404, "the index does not know this city (yet)", { index: relayer.indexer.status() });
+        return send(200, out);
+      }
+      if (relayer.scorer && req.method === "GET" && path.startsWith("/score/")) {
+        const city = decodeURIComponent(path.slice("/score/".length));
+        if (!/^0x[0-9a-fA-F]{40}$/.test(city)) throw new HttpError(400, "city must be a vault address");
+        const out = await memo(`score:${city.toLowerCase()}`, 30_000, () => relayer.scorer.score(city));
+        if (!out) throw new HttpError(404, "the index does not know this city (yet)", { index: relayer.indexer.status() });
+        return send(200, out);
+      }
+      if (relayer.catalog && req.method === "GET" && path === "/catalog") return send(200, await memo("catalog", 60_000, () => relayer.catalog.get()));
+      if (relayer.serviceJobs && req.method === "GET" && path === "/services") return send(200, relayer.serviceJobs.info());
       if (relayer.economy && req.method === "GET" && path === "/economy") return send(200, await relayer.economy.get());
       if (relayer.x402 && req.method === "GET" && path.startsWith("/paid/report/")) return await relayer.x402.handle(req, res, ctx, corsHeaders);
       if (relayer.humas && req.method === "GET" && path.startsWith("/report/")) {

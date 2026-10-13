@@ -9,10 +9,18 @@
 // Primary source: the rise of the vault's share price (convertToAssets) between two mainnet blocks, which anyone can
 // re-check onchain. Fallback: the `netApy` field of Morpho's GraphQL API. The only secret is RELAYER_PRIVATE_KEY,
 // read from the environment (never from a tracked file).
+//
+// Catalog sources: every other service of the catalog (src/catalog.mjs) whose adapter implementation is listed in
+// `catalog-impls.json` (or CATALOG_IMPLS_FILE) mirrors one DefiLlama pool; its APY (the `apy` field of DefiLlama Yields,
+// clamped to the feed's 50% ceiling) is written under keccak256(pool id), one transaction after the other.
+// `writeSource(sourceId)` writes one source right away, whatever its age: the prediction-market resolver needs a feed value
+// written after a market's measurement time.
 
+import { fileURLToPath } from "node:url";
 import { createPublicClient, createWalletClient, defineChain, http, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { apyFractionToBps, computeApyBps, findBlockAtOrBefore, shouldWrite } from "./apy.mjs";
+import { apyFractionToBps, computeApyBps, findBlockAtOrBefore, shouldWrite, MAX_APY_BPS } from "./apy.mjs";
+import { PRIMARY_ID, SEEDS, loadImpls, sharedYields, sourceIdOf } from "./catalog.mjs";
 
 const DEFAULTS = {
   mainnetRpc: "https://rpc.monad.xyz",
@@ -60,7 +68,109 @@ const cfg = () => ({
   sourceId: process.env.APY_SOURCE_ID || DEFAULTS.sourceId,
   feed: process.env.APY_FEED_ADDRESS || DEFAULTS.feed,
   morphoApi: process.env.MORPHO_API || DEFAULTS.morphoApi,
+  implsFile: process.env.CATALOG_IMPLS_FILE || fileURLToPath(new URL("./catalog-impls.json", import.meta.url)),
 });
+
+/** Catalog services (other than the primary one) the factory has an adapter implementation for. */
+function catalogSources(c) {
+  const impls = loadImpls(c.implsFile);
+  return SEEDS.filter((s) => s.id !== PRIMARY_ID && impls[s.id]).map((s) => ({ ...s, sourceId: sourceIdOf(s, c.sourceId) }));
+}
+
+/** Testnet clients for the feed updater; refuses to go on if the key is not the feed's updater. */
+async function updaterClients(c) {
+  const key = process.env.RELAYER_PRIVATE_KEY;
+  if (!key) throw new Error("RELAYER_PRIVATE_KEY is not set");
+  const account = privateKeyToAccount(key);
+  const testnet = chain(10143, "Monad Testnet", c.testnetRpc);
+  const pub = createPublicClient({ chain: testnet, transport: http(c.testnetRpc) });
+  const wallet = createWalletClient({ account, chain: testnet, transport: http(c.testnetRpc) });
+  const updater = await pub.readContract({ address: c.feed, abi: feedAbi, functionName: "updater" });
+  if (updater.toLowerCase() !== account.address.toLowerCase()) {
+    throw new Error(`${account.address} is not the feed updater (${updater}); the owner must call setUpdater first`);
+  }
+  return { pub, wallet };
+}
+
+async function writeApy({ pub, wallet }, c, sourceId, bps, observedAt, label) {
+  const hash = await wallet.writeContract({ address: c.feed, abi: feedAbi, functionName: "setApy", args: [sourceId, Number(bps), observedAt] });
+  const receipt = await pub.waitForTransactionReceipt({ hash });
+  console.log(`setApy(${label}, ${bps} bps) tx ${hash} status ${receipt.status} gasUsed ${receipt.gasUsed}`);
+  if (receipt.status !== "success") throw new Error(`setApy for ${label} reverted`);
+  return hash;
+}
+
+const clampBps = (bps) => {
+  const b = BigInt(Math.max(0, Math.round(Number(bps))));
+  return b > MAX_APY_BPS ? MAX_APY_BPS : b;
+};
+
+/** Writes the DefiLlama APY of every catalog source that changed enough or got old. Returns the number written. */
+async function catalogStep(o, c) {
+  const sources = catalogSources(c);
+  if (!sources.length) return 0;
+  const reading = await sharedYields.get();
+  if (!reading) throw new Error("DefiLlama Yields is unavailable; catalog sources not written");
+  const plan = sources.map((s) => ({ s, live: reading.pools.get(s.pool) })).filter((x) => x.live);
+  for (const { s, live } of plan) console.log(`[${new Date().toISOString()}] ${s.id}: APY ${live.apyBps} bps from DefiLlama${live.apyBps > Number(MAX_APY_BPS) ? ` (written as ${MAX_APY_BPS}, the feed's ceiling)` : ""}`);
+  const missing = sources.filter((s) => !reading.pools.get(s.pool)).map((s) => s.id);
+  if (missing.length) console.warn(`DefiLlama has no reading for ${missing.join(", ")}; skipped`);
+  if (o.dry) return 0;
+  const clients = await updaterClients(c);
+  const head = await clients.pub.getBlock();
+  const observedAt = BigInt(reading.fetchedAt) < head.timestamp ? BigInt(reading.fetchedAt) : head.timestamp;
+  let written = 0;
+  const errors = [];
+  for (const { s, live } of plan) {
+    try {
+      const bps = clampBps(live.apyBps);
+      const [curBps, curObserved] = await clients.pub.readContract({ address: c.feed, abi: feedAbi, functionName: "latest", args: [s.sourceId] });
+      if (curObserved !== 0n && observedAt <= BigInt(curObserved)) continue; // the feed already has this reading
+      const age = Number(head.timestamp - BigInt(curObserved));
+      if (!shouldWrite({ newBps: bps, currentBps: BigInt(curBps), ageSeconds: curObserved === 0n ? Infinity : age, minChangeBps: o.minChangeBps, maxAgeSeconds: o.maxAgeSec })) continue;
+      await writeApy(clients, c, s.sourceId, bps, observedAt, s.id);
+      written += 1;
+    } catch (e) {
+      errors.push(`${s.id}: ${e.shortMessage || e.message}`);
+    }
+  }
+  if (errors.length) throw new Error(`catalog sources failed: ${errors.join("; ")}`);
+  return written;
+}
+
+/**
+ * Writes one source now, even if the value did not change (the write time is what a prediction market needs). The
+ * primary source uses its on-chain reading; any catalog service (with or without an implementation) uses DefiLlama.
+ */
+async function writeSource(sourceId, o = parseArgs([])) {
+  const c = cfg();
+  const id = String(sourceId).toLowerCase();
+  let bps;
+  let observed;
+  let label;
+  if (id === c.sourceId.toLowerCase()) {
+    const r = await reading(c, o);
+    bps = r.bps;
+    observed = r.observedAt;
+    label = PRIMARY_ID;
+  } else {
+    const seed = SEEDS.find((s) => s.id !== PRIMARY_ID && sourceIdOf(s, c.sourceId).toLowerCase() === id);
+    if (!seed) throw new Error(`source ${sourceId} is not in the catalog`);
+    const y = await sharedYields.get();
+    const live = y?.pools.get(seed.pool);
+    if (!live) throw new Error(`DefiLlama has no reading for ${seed.id}`);
+    bps = clampBps(live.apyBps);
+    observed = BigInt(y.fetchedAt);
+    label = seed.id;
+  }
+  const clients = await updaterClients(c);
+  const head = await clients.pub.getBlock();
+  const [, curObserved] = await clients.pub.readContract({ address: c.feed, abi: feedAbi, functionName: "latest", args: [sourceId] });
+  // The feed accepts an observation equal to the stored one, never an older one, and never one from the future.
+  let observedAt = observed < head.timestamp ? observed : head.timestamp;
+  if (observedAt < BigInt(curObserved)) observedAt = BigInt(curObserved);
+  return writeApy(clients, c, sourceId, bps, observedAt, label);
+}
 
 /** Primary: price rise over the window. Returns { bps, source, detail }. */
 async function apyFromChain(c, windowDays) {
@@ -110,23 +220,30 @@ async function reading(c, o) {
   }
 }
 
+/** One keeper round: the primary source, then the catalog sources. A failure in one does not stop the other. */
 async function step(o) {
   const c = cfg();
+  const errors = [];
+  try {
+    await primaryStep(o, c);
+  } catch (e) {
+    errors.push(`primary: ${e.shortMessage || e.message}`);
+  }
+  try {
+    const n = await catalogStep(o, c);
+    if (n) console.log(`catalog: ${n} source(s) written`);
+  } catch (e) {
+    errors.push(e.shortMessage || e.message);
+  }
+  if (errors.length) throw new Error(errors.join(" | "));
+}
+
+async function primaryStep(o, c) {
   const r = await reading(c, o);
   console.log(`[${new Date().toISOString()}] APY ${r.bps} bps (${(Number(r.bps) / 100).toFixed(2)}%) from ${r.source}: ${r.detail}`);
   if (o.dry) return;
 
-  const key = process.env.RELAYER_PRIVATE_KEY;
-  if (!key) throw new Error("RELAYER_PRIVATE_KEY is not set");
-  const account = privateKeyToAccount(key);
-  const testnet = chain(10143, "Monad Testnet", c.testnetRpc);
-  const pub = createPublicClient({ chain: testnet, transport: http(c.testnetRpc) });
-  const wallet = createWalletClient({ account, chain: testnet, transport: http(c.testnetRpc) });
-
-  const updater = await pub.readContract({ address: c.feed, abi: feedAbi, functionName: "updater" });
-  if (updater.toLowerCase() !== account.address.toLowerCase()) {
-    throw new Error(`${account.address} is not the feed updater (${updater}); the owner must call setUpdater first`);
-  }
+  const { pub, wallet } = await updaterClients(c);
   const [curBps, curObserved] = await pub.readContract({ address: c.feed, abi: feedAbi, functionName: "latest", args: [c.sourceId] });
   const head = await pub.getBlock();
   // The feed refuses observations from the future or older than the stored one.
@@ -146,7 +263,7 @@ async function step(o) {
   if (receipt.status !== "success") throw new Error("setApy transaction reverted");
 }
 
-export { parseArgs, step };
+export { parseArgs, step, writeSource };
 
 async function main() {
   const o = parseArgs(process.argv.slice(2));

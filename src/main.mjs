@@ -4,7 +4,9 @@
 //   RELAYER_PRIVATE_KEY=0x… RUN_KEEPER=1 node src/main.mjs
 //
 // Environment: everything server.mjs reads, plus RUN_KEEPER=1 (also run the APY keeper), KEEPER_INTERVAL_SEC
-// (default 3600), KEEPER_WINDOW_DAYS (default 3). PORT is provided by the host (Railway).
+// (default 3600), KEEPER_WINDOW_DAYS (default 3), RESOLVER=1 (settle CityServices prediction markets, every
+// RESOLVER_INTERVAL_SEC, default 60) and RELEASER=1 (release streamed service fees into city vaults, checked every
+// RELEASER_INTERVAL_SEC, default 300, at most every 30 minutes per city). PORT is provided by the host (Railway).
 
 import { buildRelayerFromEnv, createHttpServer, parseAllowedOrigins } from "./server.mjs";
 import { parseArgs, step } from "./keeper.mjs";
@@ -43,7 +45,7 @@ if (process.env.RUN_INDEXER === "1" && relayer.indexer) {
     let delaySec = 20;
     try {
       const r = await relayer.indexer.step();
-      if (r.behind > 0) delaySec = 1; // still catching up: keep going
+      if (r.behind > 0 || r.backfill > 0) delaySec = 1; // still catching up (or backfilling a contract added later): keep going
       if (r.requests > 1) console.log(`indexer at block ${r.nextBlock} of ${r.head} (${r.behind} behind)`);
     } catch (e) {
       console.error(`indexer step failed: ${e.shortMessage || e.message}`);
@@ -88,8 +90,45 @@ if (process.env.RUN_WATCHDOG === "1" && relayer.watchdog) {
   watchdogTimer = setTimeout(tick, 45_000);
 }
 
+// The catalog downloads DefiLlama Yields (about 11 MB) on first use: warm it so the first GET /catalog is quick.
+if (relayer.catalog) setTimeout(() => relayer.catalog.get().catch((e) => console.error(`catalog warm-up failed: ${e?.message || e}`)), 15_000);
+
+let resolverTimer;
+if (process.env.RESOLVER === "1" && relayer.serviceJobs) {
+  const intervalSec = Number(process.env.RESOLVER_INTERVAL_SEC || 60);
+  const tick = async () => {
+    try {
+      const done = await relayer.serviceJobs.resolveDue();
+      if (done.length) console.log(`resolver: ${JSON.stringify(done)}`);
+    } catch (e) {
+      console.error(`resolver failed: ${e.shortMessage || e.message}`);
+    }
+    resolverTimer = setTimeout(tick, intervalSec * 1000);
+  };
+  console.log(`prediction-market resolver enabled, every ${intervalSec}s`);
+  resolverTimer = setTimeout(tick, 35_000);
+}
+
+let releaserTimer;
+if (process.env.RELEASER === "1" && relayer.serviceJobs) {
+  const intervalSec = Number(process.env.RELEASER_INTERVAL_SEC || 300);
+  const tick = async () => {
+    try {
+      const done = await relayer.serviceJobs.releaseDue();
+      if (done.length) console.log(`releaser: ${JSON.stringify(done)}`);
+    } catch (e) {
+      console.error(`releaser failed: ${e.shortMessage || e.message}`);
+    }
+    releaserTimer = setTimeout(tick, intervalSec * 1000);
+  };
+  console.log(`service-fee releaser enabled, every ${intervalSec}s`);
+  releaserTimer = setTimeout(tick, 55_000);
+}
+
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
+    clearTimeout(resolverTimer);
+    clearTimeout(releaserTimer);
     clearTimeout(keeperTimer);
     clearTimeout(analystTimer);
     clearTimeout(watchdogTimer);
