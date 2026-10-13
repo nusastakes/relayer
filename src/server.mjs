@@ -41,6 +41,7 @@ import { createAnalyst, createPlanStore } from "./analyst.mjs";
 import { createAgentIdentity } from "./erc8004.mjs";
 import { createPaidReports } from "./x402.mjs";
 import { createMarketplace } from "./marketplace.mjs";
+import { createWatchdog } from "./watchdog.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
@@ -133,10 +134,13 @@ export function buildRelayerFromEnv(env = process.env) {
           file: marketplaceFile || null,
         })
       : null;
+  // Presses the permissionless quarantine/restore buttons of contracts v3 when an adapter fails or recovers. Off with WATCHDOG=0.
+  const watchdog = env.WATCHDOG === "0" ? null : createWatchdog({ publicClient, factory, send: (request, options) => built.sendTransaction(request, options), balance: () => publicClient.getBalance({ address: account.address }) });
   built = createRelayer({
     publicClient,
     walletClient,
     marketplace,
+    watchdog,
     contracts: {
       chainId: 10143,
       version: env.CONTRACTS_VERSION || "v3",
@@ -272,6 +276,7 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
         return send(200, card);
       }
       if (relayer.contracts && req.method === "GET" && path === "/config") return send(200, relayer.contracts);
+      if (relayer.watchdog && req.method === "GET" && path === "/watchdog") return send(200, relayer.watchdog.info());
       if (relayer.marketplace && req.method === "GET" && path === "/marketplace") {
         const city = new URL(req.url, "http://localhost").searchParams.get("city");
         return send(200, await memo(`marketplace:${String(city).toLowerCase().slice(0, 42)}`, 10_000, () => relayer.marketplace.list({ city })));

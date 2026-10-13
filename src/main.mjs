@@ -70,10 +70,27 @@ if (process.env.RUN_ANALYST === "1" && relayer.analyst) {
   tick();
 }
 
+let watchdogTimer;
+if (process.env.RUN_WATCHDOG === "1" && relayer.watchdog) {
+  const intervalSec = Number(process.env.WATCHDOG_INTERVAL_SEC || 300);
+  const tick = async () => {
+    try {
+      const r = await relayer.watchdog.scan();
+      if (r.actions?.length) console.log(`watchdog: ${JSON.stringify(r.actions)}`);
+    } catch (e) {
+      console.error(`watchdog scan failed: ${e.shortMessage || e.message}`);
+    }
+    watchdogTimer = setTimeout(tick, intervalSec * 1000);
+  };
+  console.log(`watchdog enabled, every ${intervalSec}s`);
+  tick();
+}
+
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     clearTimeout(keeperTimer);
     clearTimeout(analystTimer);
+    clearTimeout(watchdogTimer);
     clearTimeout(indexerTimer);
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 5000).unref();

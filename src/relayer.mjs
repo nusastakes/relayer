@@ -24,7 +24,7 @@ const fullReason = (e) => [e?.shortMessage, e?.message, e?.details, e?.data, e?.
 /** The faucet's `MaxFrequencyExceeded()` error, which is not in our ABI so viem cannot name it. */
 export const FAUCET_FREQUENCY_ERROR = /MaxFrequencyExceeded|0x20e5bc67/;
 
-export function createRelayer({ publicClient, walletClient, config, style = null, analyst = null, book = null, indexer = null, humas = null, economy = null, identity = null, x402 = null, marketplace = null, contracts = null, now = () => Date.now() }) {
+export function createRelayer({ publicClient, walletClient, config, style = null, analyst = null, book = null, indexer = null, humas = null, economy = null, identity = null, x402 = null, marketplace = null, contracts = null, watchdog = null, now = () => Date.now() }) {
   const c = {
     factory: config.factory,
     faucet: config.faucet,
@@ -130,7 +130,7 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     return { maxFeePerGas: (block.baseFeePerGas * 3n) / 2n + tip, maxPriorityFeePerGas: tip };
   }
 
-  async function send(request) {
+  async function send(request, { maxGas = c.maxGas } = {}) {
     let gas;
     try {
       gas = await publicClient.estimateContractGas({ ...request, account });
@@ -139,7 +139,7 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     }
     // Monad charges the gas limit, not the gas used, so keep it close to the estimate.
     gas = (gas * c.gasMultiplierPercent) / 100n;
-    if (gas > c.maxGas) gas = c.maxGas;
+    if (gas > maxGas) gas = maxGas;
     const fees = await feeCaps();
     if (fees.maxFeePerGas) await requireFunds(gas * fees.maxFeePerGas);
     requireQueueRoom();
@@ -172,6 +172,9 @@ export function createRelayer({ publicClient, walletClient, config, style = null
     x402,
     marketplace,
     contracts,
+    watchdog,
+    /** For internal modules (the watchdog) that need the relayer's ordered, budgeted sender. */
+    sendTransaction: send,
     economy,
 
     async health() {
@@ -200,6 +203,7 @@ export function createRelayer({ publicClient, walletClient, config, style = null
         humasEnabled: Boolean(humas),
         x402Enabled: Boolean(x402),
         marketplaceEnabled: Boolean(marketplace),
+        watchdogEnabled: Boolean(watchdog),
         economyEnabled: Boolean(economy),
       };
     },
