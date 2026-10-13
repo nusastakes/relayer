@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Walks one THIRD-PARTY agent through the whole staff exchange on Monad testnet, the way an outside developer would:
-// register in the ERC-8004 Identity Registry, publish a registration file, apply to the exchange, get hired by a mayor,
-// propose a rebalance, and have the mayor approve it. The agent is a throwaway example (its card says so).
+// register in the ERC-8004 Identity Registry, publish a registration file, list the service on the AgentMarketplace
+// contract, apply to the relayer's exchange, get hired by a mayor (who pays through the marketplace), propose a
+// rebalance, and have the mayor approve it. The agent is a throwaway example (its card says so).
 //
 //   set -a; . ../.env; set +a
 //   node scripts/community-agent.mjs run        # all steps, safe to rerun (skips what is already done)
@@ -13,7 +14,7 @@
 import { appendFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createPublicClient, createWalletClient, decodeEventLog, defineChain, erc20Abi, getAddress, http, keccak256, parseAbi, parseEther, stringToHex } from "viem";
+import { createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeAbiParameters, erc20Abi, getAddress, http, keccak256, parseAbi, parseEther, stringToHex, toBytes } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { ERC8004_TESTNET, identityAbi } from "../src/erc8004.mjs";
 
@@ -22,8 +23,11 @@ const ENV_FILE = resolve(here, "../../.env");
 const DEPLOYMENTS = resolve(here, "../deployments/erc8004-testnet.json");
 const RPC = process.env.MONAD_TESTNET_RPC || "https://testnet-rpc.monad.xyz";
 const BASE = (process.env.RELAYER_URL || "https://relayer-production-39e1.up.railway.app").replace(/\/+$/, "");
-const GUARDIAN = "0x083899bEE8138E5f951db568926393FDb1F418A2";
-const CITY = process.env.DEMO_CITY || "0x887AC9965980f680dEbd08A30e2FB33aE99F2397";
+const CONTRACTS = JSON.parse(readFileSync(resolve(here, "../../contracts/deployments/monad-testnet.json"), "utf8"));
+const GUARDIAN = CONTRACTS.contracts.CityGuardian.address;
+const MARKET = CONTRACTS.contracts.AgentMarketplace.address;
+const CITY = process.env.DEMO_CITY || CONTRACTS.seed?.demoCity;
+if (!CITY) throw new Error("no demo city yet: run scripts/seed-v3.mjs first (or set DEMO_CITY)");
 const AUSD = "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC";
 const REGISTRY_REF = `eip155:10143:${ERC8004_TESTNET.identityRegistry}`;
 
@@ -37,6 +41,13 @@ const guardianAbi = parseAbi([
   "event ProposalCreated(uint256 indexed id, address indexed city, address indexed proposer, address from, address to, uint256 amount, bytes32 planHash)",
 ]);
 const cityAbi = parseAbi(["function adapters() view returns (address[])", "function mayor() view returns (address)"]);
+const marketAbi = parseAbi([
+  "function list(uint256 agentId, bytes32 capability, address asset, uint128 price, uint32 period, string uri) returns (uint256)",
+  "function hire(uint256 listingId, uint64 periods, uint256 maxTotal, address hook, bytes data) returns (uint64)",
+  "function listingIdsOf(uint256 agentId) view returns (uint256[])",
+  "event Listed(uint256 indexed listingId, uint256 indexed agentId, address indexed seller, address asset, uint128 price, uint32 period, bytes32 capability)",
+]);
+const PRICE = 100_000n; // 0.10 AUSD per week
 
 const log = (m) => console.log(m);
 const load = () => JSON.parse(readFileSync(DEPLOYMENTS, "utf8"));
@@ -121,18 +132,34 @@ async function run() {
     log(`published the registration file, tx ${hash}`);
   }
 
-  // 2. Apply to the exchange. The relayer checks everything itself.
+  // 2. List the service on the AgentMarketplace contract (permissionless), then apply to the relayer's exchange.
+  const existing = await publicClient.readContract({ address: MARKET, abi: marketAbi, functionName: "listingIdsOf", args: [BigInt(mine.agentId)] });
+  if (existing.length === 0) {
+    const { hash, receipt } = await send(agent, { address: MARKET, abi: marketAbi, functionName: "list", args: [BigInt(mine.agentId), keccak256(toBytes("nusastakes.city-staff.analis")), AUSD, PRICE, 7 * 86400, ""] });
+    mine.listingId = eventOf(receipt, marketAbi, "Listed").args.listingId.toString();
+    mine.listTx = hash;
+    save(data);
+    log(`listed on the marketplace as listing ${mine.listingId}, tx ${hash}`);
+  } else {
+    mine.listingId = existing[0].toString();
+  }
+
+  // 2b. Apply to the exchange. The relayer checks everything itself, including the listing.
   const applied = await post("/marketplace/apply", { agentId: mine.agentId });
   log(`apply -> HTTP ${applied.status}: ${applied.status === 200 ? `listed (updated: ${applied.body.updated}), wallet ${applied.body.agent.wallet}` : JSON.stringify(applied.body)}`);
   if (applied.status !== 200) throw new Error("the exchange refused the application");
 
-  // 3. The mayor hires the agent for seven days.
+  // 3. The mayor hires the agent for one week through the marketplace: the price goes straight to the agent's wallet and the
+  // guardian grants the role in the same transaction.
   const hired = await publicClient.readContract({ address: GUARDIAN, abi: guardianAbi, functionName: "isActiveAgent", args: [CITY, agent.account.address, 2] });
   if (!hired) {
-    const { hash } = await send(mayor, { address: GUARDIAN, abi: guardianAbi, functionName: "grantAgent", args: [CITY, agent.account.address, 2, BigInt(Math.floor(Date.now() / 1000) + 7 * 86400)] });
+    await send(mayor, { address: AUSD, abi: erc20Abi, functionName: "approve", args: [MARKET, PRICE] });
+    const before = await publicClient.readContract({ address: AUSD, abi: erc20Abi, functionName: "balanceOf", args: [agent.account.address] });
+    const { hash } = await send(mayor, { address: MARKET, abi: marketAbi, functionName: "hire", args: [BigInt(mine.listingId), 1n, PRICE, GUARDIAN, encodeAbiParameters([{ type: "address" }], [CITY])] });
+    const after = await publicClient.readContract({ address: AUSD, abi: erc20Abi, functionName: "balanceOf", args: [agent.account.address] });
     mine.hireTx = hash;
     save(data);
-    log(`mayor hired the agent in ${CITY}, tx ${hash}`);
+    log(`mayor hired the agent in ${CITY} through the marketplace, tx ${hash}; the agent's wallet received ${after - before} AUSD units`);
   }
   const market = await (await fetch(`${BASE}/marketplace?city=${CITY}`)).json();
   const listed = market.agents.find((a) => a.erc8004?.agentId === mine.agentId && a.source === "community");

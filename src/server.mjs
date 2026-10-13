@@ -44,7 +44,7 @@ import { createMarketplace } from "./marketplace.mjs";
 
 const DEFAULTS = {
   testnetRpc: "https://testnet-rpc.monad.xyz",
-  factory: "0x6765F0C80F6a7D5EC7Af120d12e81628F641508E", // CityFactory, contracts/deployments/monad-testnet.json
+  factory: "0x194C8c5d9B93bA108104652cAD50f938e9205607", // CityFactory, contracts/deployments/monad-testnet.json
   faucet: "0xd236c18D274E54FAccC3dd9DDA4b27965a73ee6C", // Agora AUSD testnet faucet
   styleFile: "./data/styles.json",
   proposalsFile: "./data/proposals.json",
@@ -53,11 +53,11 @@ const DEFAULTS = {
   erc8004File: "./deployments/erc8004-testnet.json",
   marketplaceFile: "./data/marketplace.json",
   publicUrl: "https://relayer-production-39e1.up.railway.app", // where the ERC-8004 registration files are served
-  factoryDeployBlock: 70461935, // block of the v2 CityFactory deployment, where the indexer starts
-  guardian: "0x083899bEE8138E5f951db568926393FDb1F418A2", // CityGuardian, contracts/deployments/monad-testnet.json
-  market: null, // AgentMarketplace (contracts v3); set by MARKETPLACE_ADDRESS
-  feed: "0x707A675DDc976B0E9C6B520Dbd0326204F30d540", // ApyFeed
-  reserve: "0x18B15f540E231Fb75F9c86a080a69c3D0FAB27C1", // YieldReserve
+  factoryDeployBlock: 70658267, // block of the v3 CityFactory deployment, where the indexer starts
+  guardian: "0x1ADE0E93F4C10b6d57F2E802B8B4e6167f0F0ea4", // CityGuardian, contracts/deployments/monad-testnet.json
+  market: "0x19EC26FBC8B00B2a670632BAd5f38120e27166f9", // AgentMarketplace (contracts v3)
+  feed: "0xFB64e2F4345c55e4c19271AC2E7210BFe6b9a7F0", // ApyFeed
+  reserve: "0x50c9de41cE85F5F4c75047B43940fd2718bFd02c", // YieldReserve
   sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d", // morpho-grove-steakhouse-high-yield-ausd-mainnet
   asset: "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC", // AUSD testnet
 };
@@ -139,7 +139,7 @@ export function buildRelayerFromEnv(env = process.env) {
     marketplace,
     contracts: {
       chainId: 10143,
-      version: env.CONTRACTS_VERSION || "v2",
+      version: env.CONTRACTS_VERSION || "v3",
       factory,
       guardian: guardianAddress,
       feed: env.FEED_ADDRESS || env.APY_FEED_ADDRESS || DEFAULTS.feed,

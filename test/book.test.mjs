@@ -99,7 +99,7 @@ test("book: survives a restart, and a corrupt file means an empty start", async 
 });
 
 test("agents: lists Satpam, Analis and Humas with their roles and addresses", () => {
-  const off = agentList({}, "0x083899bEE8138E5f951db568926393FDb1F418A2");
+  const off = agentList({}, "0x1ADE0E93F4C10b6d57F2E802B8B4e6167f0F0ea4");
   assert.deepEqual(off.agents.map((a) => [a.id, a.role, a.status]), [["satpam", 1, "simulated"], ["analis", 2, "off"], ["humas", 3, "planned"]]);
   assert.equal(off.agents[0].address, CRE_SATPAM);
   assert.equal(CRE_SATPAM, "0x" + CRE_SATPAM.slice(2), "a valid checksummed address");
@@ -129,7 +129,7 @@ test("book and agents over HTTP", async () => {
     assert.match(preflight.headers.get("access-control-allow-methods"), /PUT/);
     const agents = await (await fetch(`${base}/agents`)).json();
     assert.equal(agents.agents.length, 3);
-    assert.equal(agents.guardian, "0x083899bEE8138E5f951db568926393FDb1F418A2");
+    assert.equal(agents.guardian, "0x1ADE0E93F4C10b6d57F2E802B8B4e6167f0F0ea4");
   } finally {
     server.close();
   }

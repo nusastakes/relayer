@@ -21,7 +21,7 @@ const DEFAULTS = {
   sourceVault: "0x32841A8511D5c2c5b253f45668780B99139e476D",
   sourceId: "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d",
   // ApyFeed on Monad testnet (contracts/deployments/monad-testnet.json).
-  feed: "0x707A675DDc976B0E9C6B520Dbd0326204F30d540",
+  feed: "0xFB64e2F4345c55e4c19271AC2E7210BFe6b9a7F0",
   morphoApi: "https://blue-api.morpho.org/graphql",
 };
 

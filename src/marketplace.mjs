@@ -42,6 +42,18 @@ const MAX_CARD_BYTES = 32 * 1024;
 const FETCH_TIMEOUT_MS = 5_000;
 const REGISTRATION_TYPE = "https://eips.ethereum.org/EIPS/eip-8004#registration-v1";
 
+/** The public testnet RPC drops requests under load (for example right after the relayer starts), so reads that decorate a listing try three times. */
+async function retry(fn, tries = 3) {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= tries - 1) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (i + 1)));
+    }
+  }
+}
+
 // ─── Safe fetching of a registration file ──────────────────────────────────────────────────────────────────────────
 
 function ipv4ToInt(ip) {
@@ -366,15 +378,15 @@ export function createMarketplace({ publicClient, identity, guardian, teamAgents
       await Promise.all(
         all.map(async (a) => {
           const idText = a.erc8004?.agentId ?? null;
-          a.offers = idText && a.roleId && a.id !== "satpam" ? await offersOf(idText, a.roleId, a.erc8004?.owner ?? null).catch(() => []) : [];
+          a.offers = idText && a.roleId && a.id !== "satpam" ? await retry(() => offersOf(idText, a.roleId, a.erc8004?.owner ?? null)).catch(() => []) : [];
           const open = a.offers.find((o) => o.hireable);
           if (open && a.hireable !== false) {
             a.hireVia = hireInfo(open, cityAddress);
             a.pricing = { model: BigInt(open.price) === 0n ? "free" : "onchain", asset: open.asset, price: open.price, period: open.period, listingId: open.listingId };
           }
-          a.reputation = idText ? await identity.reputation(idText).catch(() => null) : null;
+          a.reputation = idText ? await retry(() => identity.reputation(idText)).catch(() => null) : null;
           if (cityAddress && a.wallet && a.hireable !== false && a.roleId) {
-            a.hiredInCity = await publicClient.readContract({ address: guardian, abi: guardianReadAbi, functionName: "isActiveAgent", args: [cityAddress, a.wallet, a.roleId] }).catch(() => null);
+            a.hiredInCity = await retry(() => publicClient.readContract({ address: guardian, abi: guardianReadAbi, functionName: "isActiveAgent", args: [cityAddress, a.wallet, a.roleId] })).catch(() => null);
           }
           a.hire = a.wallet && a.roleId ? { contract: guardian, function: "grantAgent(address city, address agent, uint8 role, uint64 expiry)", agent: a.wallet, role: a.roleId, ...(a.id === "satpam" ? { note: "the address is a marker: granting it makes the city accept reports from the Chainlink CRE workflow" } : {}) } : null;
           if (idText) a.rate = { registry: identity.registry.reputation, function: "giveFeedback(agentId, value, valueDecimals, tag1, tag2, endpoint, feedbackURI, feedbackHash)", agentId: idText, note: "rate from a wallet that does not own the agent; the registry refuses self-feedback" };

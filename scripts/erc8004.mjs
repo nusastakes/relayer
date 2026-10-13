@@ -105,8 +105,8 @@ async function feedback(id, value, tag1, tag2, feedbackURI = "", endpoint = "") 
 // evidence it is based on. They show the mechanism working; they are not independent users.
 async function seed() {
   await feedback("satpam", 100, "evacuation", "demo-seed", `${EXPLORER}/tx/0x10749bb7f363aaeae6461b6d3f31175921148f79da323baa478c3251a6332cca`, "cre workflow simulate --broadcast");
-  await feedback("analis", 90, "proposal-quality", "demo-seed", `${BASE}/proposals/0x887AC9965980f680dEbd08A30e2FB33aE99F2397`, `${BASE}/proposals/{city}`);
-  await feedback("humas", 85, "report-quality", "demo-seed", `${BASE}/report/0x887AC9965980f680dEbd08A30e2FB33aE99F2397?days=7`, `${BASE}/report/{city}`);
+  await feedback("analis", 90, "proposal-quality", "demo-seed", `${BASE}/proposals/0xF7d51c19e5f98b421b041Db0D6b7032f411B4e09`, `${BASE}/proposals/{city}`);
+  await feedback("humas", 85, "report-quality", "demo-seed", `${BASE}/report/0xF7d51c19e5f98b421b041Db0D6b7032f411B4e09?days=7`, `${BASE}/report/{city}`);
 }
 
 async function status() {

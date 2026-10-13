@@ -13,9 +13,9 @@ import { privateKeyToAccount } from "viem/accounts";
 import { ANALIS_ROLE, createAnalyst, createPlanStore, verifyPlan } from "../src/analyst.mjs";
 
 const RPC = process.env.MONAD_TESTNET_RPC || "https://testnet-rpc.monad.xyz";
-const GUARDIAN = "0x083899bEE8138E5f951db568926393FDb1F418A2";
-const FACTORY = "0x6765F0C80F6a7D5EC7Af120d12e81628F641508E";
-const FEED = "0x707A675DDc976B0E9C6B520Dbd0326204F30d540";
+const GUARDIAN = "0x1ADE0E93F4C10b6d57F2E802B8B4e6167f0F0ea4";
+const FACTORY = "0x194C8c5d9B93bA108104652cAD50f938e9205607";
+const FEED = "0xFB64e2F4345c55e4c19271AC2E7210BFe6b9a7F0";
 const SOURCE_ID = "0x71809e1e29dc09210f61029b6e5b4f037fb332bdf7caa16cf9362c78c500926d";
 const AUSD = "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC";
 const city = process.env.CITY;

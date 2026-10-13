@@ -9,7 +9,7 @@ import { ERC8004_TESTNET, createAgentIdentity } from "../src/erc8004.mjs";
 import { agentList } from "../src/agents.mjs";
 import { createHttpServer } from "../src/server.mjs";
 
-const GUARDIAN = "0x083899bEE8138E5f951db568926393FDb1F418A2";
+const GUARDIAN = "0x1ade0e93f4c10b6d57f2e802b8b4e6167f0f0ea4";
 const CITY = "0x887AC9965980f680dEbd08A30e2FB33aE99F2397";
 const OWNER = "0x00000000000000000000000000000000000000a1";
 const WALLET = "0x00000000000000000000000000000000000000b2";
