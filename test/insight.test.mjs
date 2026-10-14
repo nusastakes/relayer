@@ -275,6 +275,20 @@ test("humas template: Indonesian, states the figures, the movements with reasons
   assert.match(noHistory, /belum cukup/);
 });
 
+test("humas template in English: same figures and English words only", () => {
+  const f = buildFacts({ city: VAULT_A, name: "Jakarta", days: 7, now: NOW, ledger: ledgerFor(), snapshots: [{ ts: NOW - 6 * 86400, pps: (10n ** 18n).toString(), tvl: "1000000000" }], live: { totalAssets: 1_100_000_000n, pricePerShare: 1_012_000_000_000_000_000n }, residents: 3, planReasons: { [hash(0xabc)]: "Idle cash is too large." }, sealedHashes: { [hash(0xdef)]: true } });
+  const text = templateReport(f, "en");
+  assert.match(text, /7-day report for Jakarta/);
+  assert.match(text, /share price rose 1\.20%/);
+  assert.match(text, /from 1000\.00 to 1100\.00 AUSD, with 3 residents/);
+  assert.match(text, /1 deposits worth 1000\.00 AUSD and 1 withdrawals worth 200\.00 AUSD/);
+  assert.match(text, /475\.00 AUSD from cash to an adapter; reason: Idle cash is too large\./);
+  assert.match(text, /sealed strategy book/);
+  assert.match(text, /Security Guard evacuations: 1, a total of 575\.00 AUSD/);
+  assert.doesNotMatch(text, /Laporan|penduduk|Satpam|Sumber/);
+  assert.ok(keepsFigures(text, f));
+});
+
 test("humas: rewritten text must keep the figures, otherwise the template stands", () => {
   const f = { endTvl: 1_100_000_000n, returnBps: 120n };
   assert.equal(keepsFigures("Aset 1100.00 AUSD, naik 1.20%.", f), true);
@@ -365,4 +379,14 @@ test("leaderboard, metrics, economy and report over HTTP; absent when not config
   } finally {
     off.close();
   }
+});
+
+test("analyst: English reason is rebuilt from the stored plan's figures", async () => {
+  const { reasonEnOf } = await import("../src/analyst.mjs");
+  const deploy = reasonEnOf({ action: "deploy", amount: "475000000", idle: "800000000", total: "1000000000", apyBps: 650 });
+  assert.match(deploy, /Idle cash of 800\.00 AUSD \(80\.00% of the city\)/);
+  assert.match(deploy, /move 475\.00 AUSD to the yield adapter; the 325\.00 AUSD left in cash/);
+  const pull = reasonEnOf({ action: "pullback", amount: "200000000", idle: "0", total: "1000000000", apyBps: 10 });
+  assert.match(pull, /fell to 0\.10% a year/);
+  assert.match(pull, /pull 200\.00 AUSD from the adapter back to cash/);
 });

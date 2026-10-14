@@ -7,7 +7,7 @@
 // key figures (otherwise the template stands).
 
 import { getAddress, parseAbi } from "viem";
-import { formatAssets, formatPercent, askForReasonAny } from "./analyst.mjs";
+import { formatAssets, formatPercent, askForReasonAny, reasonEnOf } from "./analyst.mjs";
 import { HttpError, createRateLimiter } from "./guards.mjs";
 
 export const HUMAS_ROLE = 3;
@@ -64,8 +64,9 @@ export function buildFacts({ city, name, days, now, ledger, snapshots, live, res
   };
 }
 
-/** The report in plain Indonesian, built only from `facts`. */
-export function templateReport(f) {
+/** The report in plain Indonesian (`lang` "id", the default) or English ("en"), built only from `facts`. */
+export function templateReport(f, lang = "id") {
+  if (lang === "en") return templateReportEn(f);
   const lines = [];
   lines.push(`Laporan ${f.days} hari untuk ${f.name} (${wibDate(f.from)} sampai ${wibDate(f.to)}, WIB).`);
   if (f.returnBps === null) {
@@ -93,12 +94,48 @@ export function templateReport(f) {
   return lines.join("\n");
 }
 
-const POLISH_SYSTEM = [
-  'You are the Humas ("public relations") on a city\'s AI staff in Nusastakes, a game where each city is an on-chain vault.',
-  "You will receive a draft weekly report in Indonesian built from verified figures. Rewrite it as a clear, friendly report of at most 180 words in Indonesian.",
-  "Keep every number, date and percentage exactly as written, do not add new figures or promises, and keep the list of fund movements with their reasons.",
-  "Reply with the report text only.",
-].join(" ");
+/** The same report in plain English, for the English interface. */
+function templateReportEn(f) {
+  const lines = [];
+  lines.push(`${f.days}-day report for ${f.name} (${wibDate(f.from)} to ${wibDate(f.to)}, WIB).`);
+  if (f.returnBps === null) {
+    lines.push(`There is not enough share price history for this period yet, so its return cannot be computed. Total assets are now ${formatAssets(f.endTvl)} AUSD with ${f.residents} residents.`);
+  } else {
+    const word = f.returnBps > 0n ? "rose" : f.returnBps < 0n ? "fell" : "did not change";
+    lines.push(`Result: the share price ${word} ${signed(f.returnBps)}%. Total assets went from ${formatAssets(f.startTvl)} to ${formatAssets(f.endTvl)} AUSD, with ${f.residents} residents.`);
+    if (f.historyFrom !== null && f.historyFrom - f.from > 3600) lines.push(`Note: price history is only available since ${wibTime(f.historyFrom)} WIB, so the result above covers that span, not the full ${f.days} days.`);
+  }
+  lines.push(`Activity: ${f.deposits.count} deposits worth ${formatAssets(f.deposits.assets)} AUSD and ${f.withdrawals.count} withdrawals worth ${formatAssets(f.withdrawals.assets)} AUSD.`);
+  if (f.rebalances.length === 0) {
+    lines.push("Fund moves: none in this period.");
+  } else {
+    lines.push(`Fund moves (${f.rebalances.length}):`);
+    for (const r of f.rebalances) {
+      const direction = BigInt(r.from) === 0n ? "from cash to an adapter" : BigInt(r.to) === 0n ? "from an adapter back to cash" : "between adapters";
+      const why = r.reason ? `reason: ${r.reason}` : r.sealed ? "reason kept in the sealed strategy book (the mayor opens it at the end of the season)" : "no reason recorded";
+      lines.push(`- ${wibDate(r.ts)}: ${formatAssets(r.amount)} AUSD ${direction}; ${why}`);
+    }
+  }
+  if (f.evacuations.length) lines.push(`Security Guard evacuations: ${f.evacuations.length}, a total of ${formatAssets(f.evacuations.reduce((s, e) => s + e.amount, 0n))} AUSD pulled back to cash.`);
+  if (f.revealedKeys) lines.push(`The mayor opened ${f.revealedKeys} strategy book entries for public review.`);
+  lines.push("Source: this city's on-chain events and hourly price snapshots; amounts in AUSD.");
+  return lines.join("\n");
+}
+
+const POLISH_SYSTEM_BY_LANG = {
+  id: [
+    'You are the Humas ("public relations") on a city\'s AI staff in Nusastakes, a game where each city is an on-chain vault.',
+    "You will receive a draft weekly report in Indonesian built from verified figures. Rewrite it as a clear, friendly report of at most 180 words in Indonesian.",
+    "Keep every number, date and percentage exactly as written, do not add new figures or promises, and keep the list of fund movements with their reasons.",
+    "Reply with the report text only.",
+  ].join(" "),
+  en: [
+    "You are the Public Relations officer on a city's AI staff in Nusastakes, a game where each city is an on-chain vault.",
+    "You will receive a draft weekly report in English built from verified figures. Rewrite it as a clear, friendly report of at most 180 words in English.",
+    "Keep every number, date and percentage exactly as written, do not add new figures or promises, and keep the list of fund movements with their reasons; write everything in English.",
+    "Reply with the report text only.",
+  ].join(" "),
+};
 
 /** Key figures the rewritten text must still contain, or the template stands. */
 export function keepsFigures(text, f) {
@@ -121,14 +158,15 @@ export function createHumas({ publicClient, indexer, address, config, analystSto
       return { enabled: true, address: humasAddress, role: HUMAS_ROLE, roleName: "HUMAS", llm: providers.length > 0, llmProviders: providers.map((p) => p.provider ?? "anthropic") };
     },
 
-    /** GET /report/:city?days=7 */
-    async report(rawCity, rawDays, ctx = {}) {
+    /** GET /report/:city?days=7&lang=id|en (Indonesian by default, English for the English interface) */
+    async report(rawCity, rawDays, ctx = {}, rawLang = "id") {
       if (typeof rawCity !== "string" || !ADDRESS.test(rawCity)) throw new HttpError(400, "city must be a 20-byte hex address");
       const days = rawDays === undefined || rawDays === "" ? 7 : Number(rawDays);
       if (!Number.isInteger(days) || days < 1 || days > 30) throw new HttpError(400, "days must be a whole number from 1 to 30");
+      const lang = rawLang === "en" ? "en" : "id";
       if (ctx.ip && !perIp.hit(ctx.ip)) throw new HttpError(429, "too many report requests from this address", { retryAfterSeconds: Math.ceil(perIp.retryAfterMs(ctx.ip) / 1000) });
       const city = getAddress(rawCity);
-      const key = `${city}:${days}`;
+      const key = `${city}:${days}:${lang}`;
       const hit = cache.get(key);
       if (hit && now() - hit.at < ttlMs) return hit.value;
 
@@ -143,7 +181,7 @@ export function createHumas({ publicClient, indexer, address, config, analystSto
         publicClient.readContract({ address: city, abi: vaultAbi, functionName: "pricePerShare" }),
       ]);
       const planReasons = {};
-      for (const e of analystStore?.forCity(city) ?? []) planReasons[e.planHash.toLowerCase()] = e.plan.reason;
+      for (const e of analystStore?.forCity(city) ?? []) planReasons[e.planHash.toLowerCase()] = lang === "en" ? reasonEnOf(e.plan) : e.plan.reason;
       const sealedHashes = {};
       if (bookStore) for (const e of bookStore.list(known.mayor).entries) sealedHashes[e.hash.toLowerCase()] = true;
       const facts = buildFacts({
@@ -158,11 +196,11 @@ export function createHumas({ publicClient, indexer, address, config, analystSto
         planReasons,
         sealedHashes,
       });
-      const draft = templateReport(facts);
+      const draft = templateReport(facts, lang);
       let text = draft;
       let writtenBy = "template";
       if (providers.length) {
-        const polished = await askForReasonAny(providers, { draft }, (t) => keepsFigures(t, facts), { system: POLISH_SYSTEM, maxTokens: 900 });
+        const polished = await askForReasonAny(providers, { draft }, (t) => keepsFigures(t, facts), { system: POLISH_SYSTEM_BY_LANG[lang], maxTokens: 900 });
         if (polished) {
           text = polished;
           writtenBy = "llm";
@@ -173,6 +211,7 @@ export function createHumas({ publicClient, indexer, address, config, analystSto
         status: "ok",
         name: facts.name,
         days,
+        lang,
         period: { from: facts.from, to: facts.to },
         writtenBy,
         text,

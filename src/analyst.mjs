@@ -106,6 +106,23 @@ export function templateReason(decision, snapshot, overrides = {}) {
   return `Yield sumber turun ke ${apy}% per tahun, di bawah batas ${formatPercent(p.minApyBps)}%. Usul: tarik ${formatAssets(decision.amount)} AUSD dari adapter kembali ke kas supaya tidak terkunci di yield yang hampir nol.`;
 }
 
+/**
+ * The same reason in English, rebuilt from a stored plan's own figures, for the English interface. The plan (and its
+ * on-chain hash) keeps the Indonesian text; this is derived, so older plans get an English reason too.
+ */
+export function reasonEnOf(plan, overrides = {}) {
+  const p = { ...DEFAULT_PARAMS, ...overrides };
+  const idle = BigInt(plan.idle ?? "0");
+  const total = BigInt(plan.total ?? "0");
+  const amount = BigInt(plan.amount ?? "0");
+  const apy = formatPercent(BigInt(plan.apyBps ?? 0));
+  if (plan.action === "deploy") {
+    const idlePct = total > 0n ? formatPercent((idle * BPS) / total) : "0.00";
+    return `Idle cash of ${formatAssets(idle)} AUSD (${idlePct}% of the city) earns nothing, while the yield source pays ${apy}% a year. Proposal: move ${formatAssets(amount)} AUSD to the yield adapter; the ${formatAssets(idle - amount)} AUSD left in cash stays above the ${formatPercent(p.idleBufferBps)}% safety buffer for withdrawals.`;
+  }
+  return `The source yield fell to ${apy}% a year, below the ${formatPercent(p.minApyBps)}% minimum. Proposal: pull ${formatAssets(amount)} AUSD from the adapter back to cash so it is not stuck at a near-zero yield.`;
+}
+
 // ------------------------------------------------------------------------------------------------ the plan
 
 /** The plan whose hash goes on-chain. The key order is part of the format; do not reorder. */
@@ -459,7 +476,7 @@ export function createAnalyst({ publicClient, walletClient, config, store, llm =
             status = "unknown";
           }
         }
-        out.push({ proposalId: entry.proposalId, planHash: entry.planHash, txHash: entry.txHash, status, plan: entry.plan });
+        out.push({ proposalId: entry.proposalId, planHash: entry.planHash, txHash: entry.txHash, status, plan: entry.plan, reasonEn: reasonEnOf(entry.plan, c.params) });
       }
       return { city, analyst: account.address, proposals: out };
     },

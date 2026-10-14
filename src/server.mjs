@@ -25,7 +25,7 @@
 //   GET  /rules/presets                                           -> rule templates (toggles) a mayor can enable
 //   GET  /rules/:city  and  GET /rules/:city/preview              -> the mayor's rules with the autopilot status; what they would do now (dry run)
 //   PUT  /rules/:city { vault, rulesJson, nonce, signature }      -> mayor-signed EIP-712 CityRules (see autopilot.mjs)
-//   GET  /report/:city?days=7                                     -> the Humas's report in Indonesian (the mayor must have hired it)
+//   GET  /report/:city?days=7&lang=id                            -> the Humas's report in Indonesian, or English with lang=en (the mayor must have hired it)
 //   GET  /agents                                                  -> the AI staff a mayor can hire (Satpam, Analis, Humas)
 //   GET  /analyst                                                 -> { address, role } (the Analyst bot; needs ANALYST_PRIVATE_KEY)
 //   GET  /proposals/:city                                         -> the Analyst's proposals with their reasons and on-chain status
@@ -433,7 +433,8 @@ export function createHttpServer(relayer, { allowedOrigins = ["http://localhost:
       if (relayer.economy && req.method === "GET" && path === "/economy") return send(200, await relayer.economy.get());
       if (relayer.x402 && req.method === "GET" && path.startsWith("/paid/report/")) return await relayer.x402.handle(req, res, ctx, corsHeaders);
       if (relayer.humas && req.method === "GET" && path.startsWith("/report/")) {
-        return send(200, await relayer.humas.report(decodeURIComponent(path.slice("/report/".length)), new URL(req.url, "http://localhost").searchParams.get("days") ?? undefined, ctx));
+        const q = new URL(req.url, "http://localhost").searchParams;
+        return send(200, await relayer.humas.report(decodeURIComponent(path.slice("/report/".length)), q.get("days") ?? undefined, ctx, q.get("lang") ?? "id"));
       }
       if (relayer.identity && req.method === "GET" && /^\/agents\/[a-z]+\/card\.json$/.test(path)) {
         const card = relayer.identity.card(path.split("/")[2]);

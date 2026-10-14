@@ -112,7 +112,7 @@ export function createPaidReports({ humas, payTo, price = "$0.01", publicUrl = "
 
       // Paid and verified, nothing settled yet. Build the report first; any failure here propagates before money moves.
       const city = decodeURIComponent(url.pathname.slice("/paid/report/".length));
-      const report = await humas.report(city, url.searchParams.get("days") ?? undefined, ctx);
+      const report = await humas.report(city, url.searchParams.get("days") ?? undefined, ctx, url.searchParams.get("lang") ?? "id");
       if (report?.status !== "ok") return write(200, {}, { ...report, charged: false });
 
       const settled = await http.processSettlement(result.paymentPayload, result.paymentRequirements, result.declaredExtensions, { request: context }, undefined, result.beforeHandlerSettlement);
